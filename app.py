@@ -261,7 +261,7 @@ class SheetClient:
                 worksheet = self._spreadsheet.add_worksheet(
                     title=name, rows=200, cols=len(headers)
                 )
-                worksheet.update("A1", [headers], value_input_option="RAW")
+                worksheet.update(range_name="A1", values=[headers], value_input_option="RAW")
                 if name == "establecimientos":
                     worksheet.append_rows(
                         DEFAULT_ESTABLISHMENTS, value_input_option="RAW"
