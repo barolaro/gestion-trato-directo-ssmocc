@@ -927,6 +927,9 @@ def render_plan_admin(
                                 previous.get("fecha_publicacion") or ""
                             ),
                         }).eq("id", record["id"]).execute()
+                existing_rows = (
+                    db.table("plan_trabajo").select("*").execute().data or []
+                )
 
             # Republicar reemplaza únicamente el mismo reporte y período.
             for record in existing_rows:
