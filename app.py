@@ -1213,6 +1213,13 @@ def inject_native_data(
 
     html = replace_admin_button(html)
     html = html.replace(
+        "document.getElementById('admin-btn').onclick=openAdmin;",
+        "document.getElementById('admin-btn').onclick=()=>{"
+        "window.top.location.href='https://td-ssmocc.streamlit.app/?admin=1';"
+        "};",
+        1,
+    )
+    html = html.replace(
         "Ordenado por % TD. Seleccione una fila para ver el detalle.",
         "Ordenado por % TD. Se utiliza el nivel oficial del Anexo N°1 cuando está publicado; de lo contrario, se calcula según los umbrales.",
         1,
