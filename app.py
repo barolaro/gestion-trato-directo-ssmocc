@@ -28,6 +28,7 @@ if dashboard_path is None:
 
 dashboard_html = dashboard_path.read_text(encoding="utf-8")
 
+# El dashboard se publica dentro de Streamlit desde el index.html del repositorio.
 components.html(
     dashboard_html,
     height=5200,
