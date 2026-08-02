@@ -274,6 +274,9 @@ class SheetClient:
             ]
             if missing_headers:
                 first_column = len(existing_headers) + 1
+                required_columns = len(existing_headers) + len(missing_headers)
+                if worksheet.col_count < required_columns:
+                    worksheet.resize(cols=required_columns)
                 worksheet.update(
                     range_name=gspread.utils.rowcol_to_a1(1, first_column),
                     values=[missing_headers],
