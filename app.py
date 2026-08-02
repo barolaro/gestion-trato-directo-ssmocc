@@ -11,7 +11,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Quita los márgenes y límites de ancho que Streamlit agrega alrededor del componente.
 st.markdown(
     """
     <style>
@@ -58,24 +57,40 @@ if dashboard_path is None:
 
 dashboard_html = dashboard_path.read_text(encoding="utf-8")
 
-# Ajustes responsivos aplicados al HTML al momento de publicarlo en Streamlit.
 responsive_patch = """
 <style>
   html, body {
     width: 100% !important;
     max-width: 100% !important;
     overflow-x: hidden !important;
+    overflow-y: visible !important;
   }
 
   [class~="max-w-[1600px]"] {
     max-width: 100% !important;
   }
 
-  @media (max-width: 1500px) and (min-width: 1024px) {
+  /* En escritorio el panel lateral forma parte del flujo normal de la página. */
+  @media (min-width: 821px) {
     #sidebar {
+      position: static !important;
+      left: auto !important;
+      top: auto !important;
+      bottom: auto !important;
+      transform: none !important;
+      max-height: none !important;
+      height: auto !important;
+      overflow: visible !important;
       width: 232px !important;
+      flex: 0 0 232px !important;
     }
 
+    #scrim {
+      display: none !important;
+    }
+  }
+
+  @media (max-width: 1500px) and (min-width: 1024px) {
     body > div[class*="max-w-[1600px]"] {
       gap: 0.75rem !important;
     }
@@ -91,7 +106,8 @@ responsive_patch = """
     }
   }
 
-  @media (max-width: 1180px) {
+  /* El modo móvil queda disponible solo en pantallas realmente pequeñas. */
+  @media (max-width: 820px) {
     #sidebar {
       position: fixed !important;
       left: 0 !important;
@@ -103,6 +119,7 @@ responsive_patch = """
       border-radius: 0 !important;
       margin-top: 0 !important;
       max-height: 100vh !important;
+      overflow-y: auto !important;
     }
 
     #sidebar.open {
@@ -126,6 +143,6 @@ dashboard_html = dashboard_html.replace(
 
 components.html(
     dashboard_html,
-    height=3200,
-    scrolling=True,
+    height=3400,
+    scrolling=False,
 )
