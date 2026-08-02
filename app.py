@@ -1456,6 +1456,16 @@ def inject_native_data(
         1,
     )
 
+    html = html.replace(
+        "await loadExtra();",
+        "if(window.__SHEETS_ROWS_GZIP__){"
+        "EXTRA=[];BATCHES=[];"
+        "try{localStorage.removeItem(ROWS_KEY);"
+        "localStorage.removeItem(BATCH_KEY);}catch(e){}"
+        "}else{await loadExtra();}",
+        1,
+    )
+
     html = replace_native_loader(
         html,
         "loadLic",
