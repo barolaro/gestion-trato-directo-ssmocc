@@ -8,7 +8,7 @@ import json
 import re
 import unicodedata
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1595,13 +1595,9 @@ def main() -> None:
             data["planes"], data["plan_trabajo"], data["establecimientos"]
         ),
         str(data.get("dataset_gzip_b64") or ""),
-        max(
-            (
-                str(row.get("periodo_max") or "")
-                for row in data.get("cargas_mensuales", [])
-            ),
-            default="",
-        ),
+        (
+            date.today().replace(day=1) - timedelta(days=1)
+        ).strftime("%Y-%m"),
     )
     html = apply_layout_patch(html)
     components.html(html, height=4300, scrolling=False)
