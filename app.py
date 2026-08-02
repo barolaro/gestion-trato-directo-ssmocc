@@ -12,10 +12,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
 
-
-# -----------------------------------------------------------------------------
-# CONFIGURACIÓN
-# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Inteligencia de Adquisiciones SSMOCC",
     page_icon="📊",
@@ -24,7 +20,7 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-HTML_CANDIDATES = (
+HTML_FILES = (
     BASE_DIR / "index.html",
     BASE_DIR / "index_dashboard_final_corregido_gestion.html",
 )
@@ -35,21 +31,15 @@ st.markdown(
       #MainMenu, footer, [data-testid="stHeader"], [data-testid="stToolbar"] {
         display: none !important;
       }
-      [data-testid="stAppViewContainer"],
-      [data-testid="stMain"],
-      [data-testid="stMainBlockContainer"],
-      .block-container {
-        width: 100% !important;
-        max-width: 100vw !important;
-        padding: 0 !important;
-        margin: 0 !important;
+      [data-testid="stAppViewContainer"], [data-testid="stMain"],
+      [data-testid="stMainBlockContainer"], .block-container {
+        width:100%!important; max-width:100vw!important;
+        padding:0!important; margin:0!important;
       }
-      [data-testid="stVerticalBlock"] { gap: 0 !important; }
+      [data-testid="stVerticalBlock"] { gap:0!important; }
       iframe[title="streamlit.components.v1.html"] {
-        width: 100% !important;
-        max-width: 100% !important;
-        border: 0 !important;
-        display: block !important;
+        width:100%!important; max-width:100%!important;
+        border:0!important; display:block!important;
       }
     </style>
     """,
@@ -57,9 +47,6 @@ st.markdown(
 )
 
 
-# -----------------------------------------------------------------------------
-# SUPABASE
-# -----------------------------------------------------------------------------
 def secret(name: str, default: str = "") -> str:
     try:
         value = st.secrets.get(name, default)
@@ -69,7 +56,7 @@ def secret(name: str, default: str = "") -> str:
 
 
 @st.cache_resource
-def public_db() -> Client:
+def public_client() -> Client:
     url = secret("SUPABASE_URL")
     key = secret("SUPABASE_KEY")
     if not url or not key:
@@ -78,7 +65,7 @@ def public_db() -> Client:
 
 
 @st.cache_resource
-def admin_db() -> Client | None:
+def service_client() -> Client | None:
     url = secret("SUPABASE_URL")
     key = secret("SUPABASE_SERVICE_KEY")
     if not url or not key:
@@ -86,80 +73,74 @@ def admin_db() -> Client | None:
     return create_client(url, key)
 
 
-def fetch_rows(table: str, columns: str = "*") -> list[dict[str, Any]]:
-    result = public_db().table(table).select(columns).execute()
+def database_client() -> Client:
+    """Usa la clave de servicio en el servidor y la pública como respaldo."""
+    return service_client() or public_client()
+
+
+def read_rows(table: str, columns: str = "*") -> list[dict[str, Any]]:
+    result = database_client().table(table).select(columns).execute()
     return list(result.data or [])
 
 
-def safe_fetch(table: str, columns: str = "*") -> list[dict[str, Any]]:
+def safe_read(table: str, columns: str = "*") -> list[dict[str, Any]]:
     try:
-        return fetch_rows(table, columns)
-    except Exception:
+        return read_rows(table, columns)
+    except Exception as exc:
+        st.warning(f"No fue posible leer {table}: {exc}")
         return []
 
 
-def load_all_data() -> dict[str, list[dict[str, Any]]]:
+def load_data() -> dict[str, list[dict[str, Any]]]:
     try:
-        public_db().table("establecimientos").select("id").limit(1).execute()
+        database_client().table("establecimientos").select("id").limit(1).execute()
     except Exception as exc:
         st.error(f"No fue posible conectar con Supabase: {exc}")
-        return {
-            "establecimientos": [],
-            "contratos": [],
-            "planes": [],
-            "plan_trabajo": [],
-        }
+        return {"establecimientos": [], "contratos": [], "planes": [], "plan_trabajo": []}
 
+    establishments = safe_read("establecimientos", "id,nombre,codigo,activo")
     return {
-        "establecimientos": [
-            row
-            for row in safe_fetch("establecimientos", "id,nombre,codigo,activo")
-            if row.get("activo", True)
-        ],
-        "contratos": safe_fetch("contratos"),
-        "planes": safe_fetch("planes"),
-        "plan_trabajo": safe_fetch("plan_trabajo"),
+        "establecimientos": [r for r in establishments if r.get("activo", True)],
+        "contratos": safe_read("contratos"),
+        "planes": safe_read("planes"),
+        "plan_trabajo": safe_read("plan_trabajo"),
     }
 
 
-# -----------------------------------------------------------------------------
-# UTILIDADES
-# -----------------------------------------------------------------------------
-def normalize_text(value: Any) -> str:
+def normalize(value: Any) -> str:
     text = str(value or "").strip().lower()
     text = "".join(
-        char
-        for char in unicodedata.normalize("NFD", text)
+        char for char in unicodedata.normalize("NFD", text)
         if unicodedata.category(char) != "Mn"
     )
-    return re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def detect_column(columns: list[str], candidates: list[str]) -> str | None:
-    normalized = {normalize_text(column): column for column in columns}
-    for candidate in candidates:
-        candidate_normalized = normalize_text(candidate)
-        if candidate_normalized in normalized:
-            return normalized[candidate_normalized]
-    for column in columns:
-        normalized_column = normalize_text(column)
-        if any(normalize_text(candidate) in normalized_column for candidate in candidates):
-            return column
-    return None
-
-
-def normalize_level(value: Any) -> str:
-    level = normalize_text(value)
-    if "rojo" in level:
+def level_name(value: Any) -> str:
+    text = normalize(value)
+    if "rojo" in text:
         return "Rojo"
-    if "amarillo" in level:
+    if "amarillo" in text:
         return "Amarillo"
-    if "verde" in level:
+    if "verde" in text:
         return "Verde"
     return str(value or "").strip().title()
 
 
-def dataframe_from_upload(uploaded_file) -> pd.DataFrame:
+def detect_column(columns: list[str], candidates: list[str]) -> str | None:
+    exact = {normalize(column): column for column in columns}
+    for candidate in candidates:
+        if normalize(candidate) in exact:
+            return exact[normalize(candidate)]
+    for column in columns:
+        normalized = normalize(column)
+        if any(normalize(candidate) in normalized for candidate in candidates):
+            return column
+    return None
+
+
+def uploaded_dataframe(uploaded_file) -> pd.DataFrame:
     suffix = Path(uploaded_file.name).suffix.lower()
     if suffix == ".csv":
         try:
@@ -170,113 +151,70 @@ def dataframe_from_upload(uploaded_file) -> pd.DataFrame:
     return pd.read_excel(uploaded_file)
 
 
-# -----------------------------------------------------------------------------
-# PAYLOADS PARA EL DASHBOARD
-# -----------------------------------------------------------------------------
-def contract_payload(
+def contracts_for_html(
     contracts: list[dict[str, Any]],
     establishments: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     names = {row.get("id"): row.get("nombre", "") for row in establishments}
     payload: dict[str, dict[str, Any]] = {}
-
     for row in contracts:
-        establishment = (
-            row.get("establecimiento")
-            or names.get(row.get("establecimiento_id"))
-            or ""
-        )
+        establishment = row.get("establecimiento") or names.get(row.get("establecimiento_id"), "")
         tender = str(row.get("licitacion") or "").strip()
         if not establishment or not tender:
             continue
-
         payload[f"{establishment}||{tender}"] = {
             "adj": float(row.get("monto_adjudicado") or 0),
             "awardDate": str(row.get("fecha_adjudicacion") or ""),
             "durationMonths": int(row.get("duracion_meses") or 0),
             "renewalLead": int(row.get("anticipacion_renovacion") or 6),
             "manager": str(row.get("responsable") or ""),
-            "contractStatus": str(
-                row.get("estado_administrativo")
-                or row.get("estado")
-                or "Vigente"
-            ),
+            "contractStatus": str(row.get("estado") or "Vigente"),
             "notes": str(row.get("observaciones") or ""),
-            "updatedAt": str(
-                row.get("actualizado_en")
-                or row.get("ultima_actualizacion")
-                or ""
-            ),
+            "updatedAt": str(row.get("ultima_actualizacion") or ""),
         }
-
     return payload
 
 
-def official_plan_payload(
-    planes: list[dict[str, Any]],
+def plans_for_html(
     plan_rows: list[dict[str, Any]],
     establishments: list[dict[str, Any]],
-) -> dict[str, Any]:
-    if not planes:
-        return {"meta": None, "items": []}
+) -> list[dict[str, Any]]:
+    names = {row.get("id"): row.get("nombre", "") for row in establishments}
+    output: list[dict[str, Any]] = []
+    for row in plan_rows:
+        establishment = row.get("establecimiento") or names.get(row.get("establecimiento_id"), "")
+        if not establishment:
+            continue
+        output.append(
+            {
+                "establecimiento": establishment,
+                "key": normalize(establishment),
+                "nivel": level_name(row.get("nivel")),
+                "acciones": str(row.get("acciones") or "").strip(),
+                "responsable": str(row.get("responsable") or "").strip(),
+                "fecha": str(row.get("fecha_compromiso") or "").strip(),
+                "estado": str(row.get("estado") or "Publicado").strip(),
+                "observaciones": str(row.get("observaciones") or "").strip(),
+            }
+        )
+    return output
 
-    latest = sorted(
+
+def latest_plan_metadata(planes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not planes:
+        return None
+    return sorted(
         planes,
-        key=lambda row: (
-            str(row.get("fecha_publicacion") or ""),
-            int(row.get("id") or 0),
-        ),
+        key=lambda row: (str(row.get("fecha_publicacion") or ""), int(row.get("id") or 0)),
         reverse=True,
     )[0]
 
-    names = {row.get("id"): row.get("nombre", "") for row in establishments}
-    items = []
-    for row in plan_rows:
-        establishment = (
-            row.get("establecimiento")
-            or names.get(row.get("establecimiento_id"))
-            or ""
-        )
-        if not establishment:
-            continue
-        items.append(
-            {
-                "estab": establishment,
-                "nivel": normalize_level(row.get("nivel")),
-                "pct": row.get("porcentaje") or row.get("pct") or "",
-                "causas": row.get("causas") or "",
-                "medidas": row.get("medidas") or row.get("acciones") or "",
-                "compromisos": row.get("compromisos") or row.get("observaciones") or "",
-                "responsable": row.get("responsable") or "",
-                "fecha": str(row.get("fecha_compromiso") or ""),
-            }
-        )
 
-    return {
-        "meta": {
-            "id": latest.get("id"),
-            "fileName": latest.get("nombre_archivo") or "",
-            "reporte": latest.get("reporte") or "",
-            "periodo": latest.get("periodo") or "",
-            "publishedAt": str(latest.get("fecha_publicacion") or ""),
-            "establecimientos": latest.get("establecimientos") or len(items),
-            "rojos": latest.get("rojos") or 0,
-            "amarillos": latest.get("amarillos") or 0,
-            "verdes": latest.get("verdes") or 0,
-        },
-        "items": items,
-    }
-
-
-# -----------------------------------------------------------------------------
-# ADMINISTRACIÓN
-# -----------------------------------------------------------------------------
-def require_admin_login() -> bool:
+def admin_login() -> bool:
     password = secret("ADMIN_PASSWORD")
     if not password:
         st.error("Falta configurar ADMIN_PASSWORD en Streamlit Secrets.")
         return False
-
     if st.session_state.get("admin_authenticated"):
         return True
 
@@ -293,48 +231,39 @@ def require_admin_login() -> bool:
     return False
 
 
-def render_contract_admin(
-    db: Client,
-    establishments: list[dict[str, Any]],
-    contracts: list[dict[str, Any]],
-) -> None:
-    establishment_options = {
+def render_contract_admin(data: dict[str, list[dict[str, Any]]], db: Client) -> None:
+    establishments = data["establecimientos"]
+    contracts = data["contratos"]
+    options = {
         row["nombre"]: row["id"]
         for row in establishments
         if row.get("nombre") and row.get("id") is not None
     }
-    if not establishment_options:
+    if not options:
         st.error("No existen establecimientos disponibles.")
         return
 
-    id_to_name = {value: key for key, value in establishment_options.items()}
-    options = {"Crear nuevo contrato": {}}
+    id_to_name = {value: key for key, value in options.items()}
+    contract_options: dict[str, dict[str, Any]] = {"Crear nuevo contrato": {}}
     for contract in contracts:
         label = (
             f"{contract.get('licitacion', 'Sin código')} · "
             f"{id_to_name.get(contract.get('establecimiento_id'), 'Sin establecimiento')}"
         )
-        options[label] = contract
+        contract_options[label] = contract
 
-    selected_label = st.selectbox("Contrato a gestionar", list(options))
-    selected = options[selected_label]
-
-    establishment_names = list(establishment_options)
-    selected_establishment = id_to_name.get(
-        selected.get("establecimiento_id"),
-        establishment_names[0],
-    )
+    selected_label = st.selectbox("Contrato a gestionar", list(contract_options))
+    selected = contract_options[selected_label]
+    establishment_names = list(options)
+    current_name = id_to_name.get(selected.get("establecimiento_id"), establishment_names[0])
 
     with st.form("contract_form"):
         establishment = st.selectbox(
             "Establecimiento",
             establishment_names,
-            index=establishment_names.index(selected_establishment),
+            index=establishment_names.index(current_name),
         )
-        tender = st.text_input(
-            "Licitación / instrumento",
-            value=str(selected.get("licitacion") or ""),
-        )
+        tender = st.text_input("Licitación / instrumento", value=str(selected.get("licitacion") or ""))
         amount = st.number_input(
             "Monto adjudicado",
             min_value=0.0,
@@ -342,62 +271,35 @@ def render_contract_admin(
             value=float(selected.get("monto_adjudicado") or 0),
             format="%.0f",
         )
-
         raw_date = selected.get("fecha_adjudicacion")
         try:
-            award_default = date.fromisoformat(str(raw_date)) if raw_date else date.today()
+            default_date = date.fromisoformat(str(raw_date)) if raw_date else date.today()
         except ValueError:
-            award_default = date.today()
-
-        award_date = st.date_input("Fecha de adjudicación", value=award_default)
-
+            default_date = date.today()
+        award_date = st.date_input("Fecha de adjudicación", value=default_date)
         col1, col2 = st.columns(2)
-        duration = col1.number_input(
-            "Duración (meses)",
-            min_value=1,
-            max_value=240,
-            value=int(selected.get("duracion_meses") or 12),
-        )
+        duration = col1.number_input("Duración (meses)", 1, 240, int(selected.get("duracion_meses") or 12))
         renewal = col2.number_input(
-            "Anticipación de renovación (meses)",
-            min_value=0,
-            max_value=36,
-            value=int(selected.get("anticipacion_renovacion") or 6),
+            "Anticipación de renovación (meses)", 0, 36,
+            int(selected.get("anticipacion_renovacion") or 6),
         )
-
-        statuses = [
-            "Vigente",
-            "En renovación",
-            "Prorrogado",
-            "Finalizado",
-            "Suspendido",
-        ]
+        statuses = ["Vigente", "En renovación", "Prorrogado", "Finalizado", "Suspendido"]
         current_status = str(selected.get("estado") or "Vigente")
         status = st.selectbox(
             "Estado administrativo",
             statuses,
             index=statuses.index(current_status) if current_status in statuses else 0,
         )
-        manager = st.text_input(
-            "Responsable",
-            value=str(selected.get("responsable") or ""),
-        )
-        observations = st.text_area(
-            "Observaciones",
-            value=str(selected.get("observaciones") or ""),
-        )
-        save = st.form_submit_button(
-            "💾 Guardar gestión contractual",
-            use_container_width=True,
-        )
+        manager = st.text_input("Responsable", value=str(selected.get("responsable") or ""))
+        observations = st.text_area("Observaciones", value=str(selected.get("observaciones") or ""))
+        save = st.form_submit_button("💾 Guardar gestión contractual", use_container_width=True)
 
     if save:
         if not tender.strip():
             st.error("Debes ingresar la licitación o instrumento.")
             return
-
         payload = {
-            "establecimiento_id": establishment_options[establishment],
+            "establecimiento_id": options[establishment],
             "licitacion": tender.strip(),
             "monto_adjudicado": amount,
             "fecha_adjudicacion": award_date.isoformat(),
@@ -407,7 +309,6 @@ def render_contract_admin(
             "responsable": manager.strip(),
             "observaciones": observations.strip(),
         }
-
         try:
             if selected.get("id") is not None:
                 db.table("contratos").update(payload).eq("id", selected["id"]).execute()
@@ -423,46 +324,34 @@ def build_plan_rows(
     dataframe: pd.DataFrame,
     establishments: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, int], list[str]]:
-    columns = [str(column).strip() for column in dataframe.columns]
-    dataframe.columns = columns
+    dataframe = dataframe.copy()
+    dataframe.columns = [str(column).strip() for column in dataframe.columns]
+    columns = list(dataframe.columns)
 
-    establishment_column = detect_column(
-        columns,
-        ["establecimiento", "hospital", "centro", "nombre establecimiento"],
-    )
-    level_column = detect_column(
-        columns,
-        ["nivel", "clasificacion", "riesgo", "semaforo", "color"],
-    )
+    establishment_col = detect_column(columns, ["establecimiento", "hospital", "centro"])
+    level_col = detect_column(columns, ["nivel", "clasificacion", "riesgo", "semaforo", "color"])
+    action_col = detect_column(columns, ["acciones", "medidas", "plan comprometido", "plan de accion"])
+    responsible_col = detect_column(columns, ["responsable"])
+    date_col = detect_column(columns, ["fecha compromiso", "plazo", "fecha"])
+    observation_col = detect_column(columns, ["observaciones", "compromisos", "causas", "justificacion"])
 
-    if not establishment_column or not level_column:
-        raise ValueError(
-            "El archivo debe contener una columna de establecimiento y otra de nivel/clasificación."
-        )
-
-    action_column = detect_column(columns, ["acciones", "medidas"])
-    responsible_column = detect_column(columns, ["responsable"])
-    date_column = detect_column(columns, ["fecha compromiso", "fecha"])
-    observation_column = detect_column(
-        columns,
-        ["observaciones", "compromisos", "causas"],
-    )
+    if not establishment_col or not level_col:
+        raise ValueError("El archivo debe incluir columnas de establecimiento y nivel/clasificación.")
 
     establishment_map = {
-        normalize_text(row.get("nombre")): row.get("id")
-        for row in establishments
-        if row.get("id") is not None
+        normalize(row.get("nombre")): row.get("id")
+        for row in establishments if row.get("id") is not None
     }
-
     aliases = {
-        "felix bulnes": "hospital dr. felix bulnes cerda",
+        "felix bulnes": "hospital dr felix bulnes cerda",
+        "hospital felix bulnes": "hospital dr felix bulnes cerda",
         "san juan de dios": "hospital san juan de dios",
         "talagante": "hospital de talagante",
         "melipilla": "hospital de melipilla",
         "penaflor": "hospital de penaflor",
-        "crs s. allende": "crs salvador allende",
-        "inst. traumatologico": "instituto traumatologico",
-        "ssmocc direccion": "ssmocc (direccion)",
+        "crs s allende": "crs salvador allende",
+        "inst traumatologico": "instituto traumatologico",
+        "ssmocc direccion": "ssmocc direccion",
     }
 
     rows: list[dict[str, Any]] = []
@@ -470,111 +359,73 @@ def build_plan_rows(
     counts = {"Rojo": 0, "Amarillo": 0, "Verde": 0}
 
     for _, record in dataframe.iterrows():
-        establishment_name = str(record.get(establishment_column) or "").strip()
+        establishment_name = str(record.get(establishment_col) or "").strip()
         if not establishment_name or establishment_name.lower() == "nan":
             continue
-
-        normalized_name = normalize_text(establishment_name)
-        normalized_name = aliases.get(normalized_name, normalized_name)
-        establishment_id = establishment_map.get(normalized_name)
-
+        key = normalize(establishment_name)
+        key = aliases.get(key, key)
+        establishment_id = establishment_map.get(key)
         if establishment_id is None:
             unmatched.append(establishment_name)
             continue
 
-        level = normalize_level(record.get(level_column))
+        level = level_name(record.get(level_col))
         if level in counts:
             counts[level] += 1
 
-        row = {
+        def cell(column: str | None) -> str:
+            if not column:
+                return ""
+            value = record.get(column)
+            return "" if pd.isna(value) else str(value).strip()
+
+        row: dict[str, Any] = {
             "establecimiento_id": establishment_id,
             "nivel": level,
-            "acciones": (
-                str(record.get(action_column) or "").strip()
-                if action_column
-                else ""
-            ),
-            "responsable": (
-                str(record.get(responsible_column) or "").strip()
-                if responsible_column
-                else ""
-            ),
+            "acciones": cell(action_col),
+            "responsable": cell(responsible_col),
             "estado": "Publicado",
-            "observaciones": (
-                str(record.get(observation_column) or "").strip()
-                if observation_column
-                else ""
-            ),
+            "observaciones": cell(observation_col),
         }
-
-        if date_column:
-            value = record.get(date_column)
+        if date_col:
+            value = record.get(date_col)
             if pd.notna(value):
                 try:
                     row["fecha_compromiso"] = pd.to_datetime(value).date().isoformat()
                 except Exception:
                     pass
-
         rows.append(row)
 
     return rows, counts, sorted(set(unmatched))
 
 
-def render_plan_admin(
-    db: Client,
-    establishments: list[dict[str, Any]],
-    planes: list[dict[str, Any]],
-) -> None:
-    st.subheader("☁️ Publicar plan oficial")
-
-    if planes:
-        latest = sorted(
-            planes,
-            key=lambda row: (
-                str(row.get("fecha_publicacion") or ""),
-                int(row.get("id") or 0),
-            ),
-            reverse=True,
-        )[0]
-        st.success(
-            f"Plan vigente: {latest.get('nombre_archivo') or 'Sin nombre'} · "
-            f"{latest.get('establecimientos') or 0} establecimientos · "
-            f"{latest.get('rojos') or 0} rojo · "
-            f"{latest.get('amarillos') or 0} amarillo · "
-            f"{latest.get('verdes') or 0} verde."
-        )
-
-    uploaded = st.file_uploader(
-        "Archivo oficial (Excel o CSV)",
-        type=["xlsx", "xls", "csv"],
+def render_plan_admin(data: dict[str, list[dict[str, Any]]], db: Client) -> None:
+    st.subheader("☁️ Plan de trabajo oficial · Anexo N°1")
+    st.info(
+        "Publique nuevamente el archivo desde este módulo. El administrador antiguo del HTML "
+        "solo guardaba información en el navegador y no en Supabase."
     )
 
+    uploaded = st.file_uploader("Seleccionar Anexo N°1", type=["xlsx", "xls", "csv"])
     col1, col2 = st.columns(2)
     reporte = col1.text_input("Reporte", value="Reporte 1")
     periodo = col2.text_input("Período", value="Enero–Marzo 2026")
     publication_date = st.date_input("Fecha de publicación", value=date.today())
 
-    preview_rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     counts = {"Rojo": 0, "Amarillo": 0, "Verde": 0}
     unmatched: list[str] = []
 
     if uploaded is not None:
         try:
-            dataframe = dataframe_from_upload(uploaded)
-            preview_rows, counts, unmatched = build_plan_rows(
-                dataframe,
-                establishments,
-            )
-            st.write(
-                f"Se detectaron **{len(preview_rows)} establecimientos válidos**: "
-                f"{counts['Rojo']} rojos, {counts['Amarillo']} amarillos y "
-                f"{counts['Verde']} verdes."
+            dataframe = uploaded_dataframe(uploaded)
+            rows, counts, unmatched = build_plan_rows(dataframe, data["establecimientos"])
+            st.success(
+                f"Archivo leído: {len(rows)} establecimientos válidos · "
+                f"{counts['Rojo']} rojos · {counts['Amarillo']} amarillos · {counts['Verde']} verdes."
             )
             if unmatched:
-                st.warning(
-                    "No se reconocieron estos establecimientos: "
-                    + ", ".join(unmatched)
-                )
+                st.warning("No se reconocieron: " + ", ".join(unmatched))
             st.dataframe(dataframe.head(20), use_container_width=True)
         except Exception as exc:
             st.error(f"No fue posible leer el archivo: {exc}")
@@ -583,7 +434,7 @@ def render_plan_admin(
         "☁️ Publicar plan oficial en Supabase",
         type="primary",
         use_container_width=True,
-        disabled=uploaded is None or not preview_rows,
+        disabled=uploaded is None or not rows,
     )
 
     if publish and uploaded is not None:
@@ -592,240 +443,213 @@ def render_plan_admin(
             "reporte": reporte.strip(),
             "periodo": periodo.strip(),
             "fecha_publicacion": publication_date.isoformat(),
-            "establecimientos": len(preview_rows),
+            "establecimientos": len(rows),
             "rojos": counts["Rojo"],
             "amarillos": counts["Amarillo"],
             "verdes": counts["Verde"],
             "url_archivo": "",
         }
-
         try:
             db.table("plan_trabajo").delete().neq("id", 0).execute()
-            if preview_rows:
-                db.table("plan_trabajo").insert(preview_rows).execute()
+            db.table("plan_trabajo").insert(rows).execute()
             db.table("planes").insert(metadata).execute()
-
-            st.success(
-                f"Plan oficial publicado en Supabase: {len(preview_rows)} establecimientos."
-            )
+            st.success(f"Plan publicado en Supabase con {len(rows)} establecimientos.")
             st.rerun()
         except Exception as exc:
             st.error(f"No fue posible publicar el plan: {exc}")
 
-    if planes:
+    current = latest_plan_metadata(data["planes"])
+    if current:
         st.divider()
-        st.subheader("Planes publicados")
-        for plan in sorted(
-            planes,
-            key=lambda row: int(row.get("id") or 0),
-            reverse=True,
-        ):
-            col_info, col_delete = st.columns([6, 1])
-            col_info.write(
-                f"**{plan.get('nombre_archivo') or 'Sin nombre'}** — "
-                f"{plan.get('reporte') or ''} · {plan.get('periodo') or ''} · "
-                f"{plan.get('fecha_publicacion') or ''}"
-            )
-            if col_delete.button(
-                "Eliminar",
-                key=f"delete_plan_{plan.get('id')}",
-            ):
-                try:
-                    db.table("planes").delete().eq("id", plan["id"]).execute()
-                    if len(planes) == 1:
-                        db.table("plan_trabajo").delete().neq("id", 0).execute()
-                    st.success("Plan eliminado.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"No fue posible eliminar el plan: {exc}")
+        st.write(
+            f"**Plan registrado en Supabase:** {current.get('nombre_archivo') or 'Sin nombre'} · "
+            f"{current.get('establecimientos') or 0} establecimientos · "
+            f"publicado {current.get('fecha_publicacion') or ''}."
+        )
+        st.write(f"Filas de detalle disponibles: **{len(data['plan_trabajo'])}**")
 
 
 def render_admin(data: dict[str, list[dict[str, Any]]]) -> None:
-    if not require_admin_login():
+    if not admin_login():
         return
-
-    db = admin_db()
+    db = service_client()
     if db is None:
         st.error("Falta configurar SUPABASE_SERVICE_KEY en Streamlit Secrets.")
         return
 
-    top_left, top_right = st.columns([6, 1])
-    top_left.success("Sesión administrativa activa.")
-    if top_right.button("Cerrar sesión"):
+    left, right = st.columns([6, 1])
+    left.success("Sesión administrativa activa.")
+    if right.button("Cerrar sesión"):
         st.session_state["admin_authenticated"] = False
         st.query_params.clear()
         st.rerun()
 
-    tab_contracts, tab_plan = st.tabs(
-        ["📄 Gestión contractual", "☁️ Plan oficial"]
-    )
-
+    tab_contracts, tab_plan = st.tabs(["📄 Gestión contractual", "☁️ Plan oficial"])
     with tab_contracts:
-        render_contract_admin(
-            db,
-            data["establecimientos"],
-            data["contratos"],
-        )
-
+        render_contract_admin(data, db)
     with tab_plan:
-        render_plan_admin(
-            db,
-            data["establecimientos"],
-            data["planes"],
-        )
+        render_plan_admin(data, db)
 
     if st.button("← Volver al dashboard"):
         st.query_params.clear()
         st.rerun()
 
 
-# -----------------------------------------------------------------------------
-# DASHBOARD HTML
-# -----------------------------------------------------------------------------
-def load_dashboard_html() -> str:
-    path = next(
-        (candidate for candidate in HTML_CANDIDATES if candidate.exists()),
-        None,
-    )
-    if path is None:
-        raise FileNotFoundError("No se encontró index.html junto a app.py.")
-    return path.read_text(encoding="utf-8")
+def load_html() -> str:
+    for path in HTML_FILES:
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    raise FileNotFoundError("No se encontró index.html junto a app.py.")
 
 
-def replace_admin_button(html: str) -> str:
-    pattern = re.compile(
-        r"<button(?P<attrs>[^>]*)>(?P<body>(?:(?!</button>).)*Administrador(?:(?!</button>).)*)</button>",
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    def replacement(match: re.Match[str]) -> str:
-        attrs = re.sub(
-            r"\s+onclick\s*=\s*(['\"]).*?\1",
-            "",
-            match.group("attrs"),
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        return (
-            f'<a{attrs} href="?admin=1" target="_top">'
-            f'{match.group("body")}</a>'
-        )
-
-    return pattern.sub(replacement, html, count=1)
-
-
-def inject_supabase_data(
+def inject_data(
     html: str,
-    contracts_payload: dict[str, dict[str, Any]],
-    plan_payload: dict[str, Any],
+    contracts: dict[str, dict[str, Any]],
+    plan_rows: list[dict[str, Any]],
+    plan_meta: dict[str, Any] | None,
 ) -> str:
-    contracts_json = json.dumps(
-        contracts_payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).replace("</", "<\\/")
-    plan_json = json.dumps(
-        plan_payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).replace("</", "<\\/")
+    contracts_json = json.dumps(contracts, ensure_ascii=False).replace("</", "<\\/")
+    rows_json = json.dumps(plan_rows, ensure_ascii=False).replace("</", "<\\/")
+    meta_json = json.dumps(plan_meta, ensure_ascii=False).replace("</", "<\\/")
 
-    plan_keys = re.findall(
-        r"(?:const|let|var)\s+PLAN_KEY\s*=\s*['\"]([^'\"]+)['\"]",
-        html,
-    )
-    plan_key = plan_keys[0] if plan_keys else "ssmocc_plan_oficial_v1"
-
-    preload = f"""
+    script = f"""
     <script>
       window.__SUPABASE_CONTRACTS__ = {contracts_json};
-      window.__SUPABASE_PLAN__ = {plan_json};
-      try {{
-        localStorage.setItem({json.dumps(plan_key)}, JSON.stringify(window.__SUPABASE_PLAN__));
-      }} catch (e) {{}}
+      window.__SUPABASE_PLAN_ROWS__ = {rows_json};
+      window.__SUPABASE_PLAN_META__ = {meta_json};
+
+      function ssmoccNorm(v) {{
+        return String(v || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
+          .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      }}
+
+      function ssmoccVisible(el) {{
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      }}
+
+      function ssmoccCurrentPlan() {{
+        const rows = window.__SUPABASE_PLAN_ROWS__ || [];
+        if (!rows.length) return null;
+
+        const selected = [...document.querySelectorAll('select')]
+          .map(el => el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex].textContent : '')
+          .filter(Boolean).join(' ');
+        const pageText = document.body ? document.body.innerText : '';
+        const source = ssmoccNorm(selected + ' ' + pageText);
+
+        const aliases = {{
+          'hospital dr felix bulnes cerda': ['felix bulnes','hospital felix bulnes'],
+          'hospital san juan de dios': ['san juan de dios'],
+          'hospital de talagante': ['talagante'],
+          'hospital de melipilla': ['melipilla'],
+          'hospital de penaflor': ['penaflor'],
+          'crs salvador allende': ['crs s allende','crs salvador allende'],
+          'instituto traumatologico': ['inst traumatologico','instituto traumatologico'],
+          'ssmocc direccion': ['ssmocc direccion']
+        }};
+
+        for (const row of rows) {{
+          const key = ssmoccNorm(row.establecimiento);
+          const candidates = [key, ...(aliases[key] || [])].map(ssmoccNorm);
+          if (candidates.some(candidate => candidate && source.includes(candidate))) return row;
+        }}
+        return rows[0];
+      }}
+
+      function ssmoccRenderPlan() {{
+        const row = ssmoccCurrentPlan();
+        if (!row) return;
+
+        const pending = [...document.querySelectorAll('div,p,span')].find(el =>
+          ssmoccVisible(el) && ssmoccNorm(el.textContent).includes('plan comprometido pendiente')
+        );
+        if (!pending) return;
+
+        let target = pending;
+        while (target.parentElement && target.parentElement.textContent.trim() === pending.textContent.trim()) {{
+          target = target.parentElement;
+        }}
+
+        const actions = row.acciones
+          ? row.acciones.split(/\\n|•|;/).map(x => x.trim()).filter(Boolean)
+          : [];
+        const actionHtml = actions.length
+          ? '<ul style="margin:8px 0 0 20px">' + actions.map(x => '<li style="margin:5px 0">' + x + '</li>').join('') + '</ul>'
+          : '<p style="margin:8px 0 0">Sin acciones informadas.</p>';
+
+        target.innerHTML = `
+          <div style="padding:16px 18px;border:1px solid #b9d7f2;border-radius:12px;background:#f7fbff;color:#334155">
+            <div style="font-weight:800;color:#0b4f87;margin-bottom:6px">✅ Plan comprometido oficial</div>
+            ${{actionHtml}}
+            ${{row.observaciones ? `<div style="margin-top:12px"><b>Observaciones:</b> ${{row.observaciones}}</div>` : ''}}
+            ${{row.responsable ? `<div style="margin-top:8px"><b>Responsable:</b> ${{row.responsable}}</div>` : ''}}
+            ${{row.fecha ? `<div style="margin-top:8px"><b>Fecha compromiso:</b> ${{row.fecha}}</div>` : ''}}
+          </div>`;
+        target.dataset.supabasePlan = row.key || row.establecimiento;
+      }}
+
+      document.addEventListener('click', function(event) {{
+        const control = event.target.closest('button,a');
+        if (!control) return;
+        if (ssmoccNorm(control.textContent).includes('administrador')) {{
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          window.top.location.href = 'https://td-ssmocc.streamlit.app/?admin=1';
+        }}
+      }}, true);
+
+      document.addEventListener('DOMContentLoaded', function() {{
+        ssmoccRenderPlan();
+        const observer = new MutationObserver(() => ssmoccRenderPlan());
+        observer.observe(document.body, {{childList:true, subtree:true, characterData:true}});
+        setInterval(ssmoccRenderPlan, 1200);
+      }});
     </script>
     """
-    html = html.replace("</head>", preload + "\n</head>", 1)
+    html = html.replace("</body>", script + "\n</body>", 1)
 
     old_load = (
         "function loadLic(){ try{LIC=JSON.parse("
         "localStorage.getItem(LIC_KEY)||'{}');}catch(e){LIC={};} }"
     )
-    new_load = (
-        "function loadLic(){"
-        "try{LIC=window.__SUPABASE_CONTRACTS__||{};}"
-        "catch(e){LIC={};}"
-        "}"
-    )
+    new_load = "function loadLic(){try{LIC=window.__SUPABASE_CONTRACTS__||{};}catch(e){LIC={};}}"
     html = html.replace(old_load, new_load, 1)
 
-    old_save = (
-        "function saveLic(){ try{localStorage.setItem("
-        "LIC_KEY,JSON.stringify(LIC));}catch(e){} }"
-    )
-    new_save = (
-        "function saveLic(){"
-        "try{toast('Use Administrador para guardar en Supabase');}"
-        "catch(e){}"
-        "}"
-    )
-    html = html.replace(old_save, new_save, 1)
-
-    return replace_admin_button(html)
-
-
-def apply_layout_patch(html: str) -> str:
     patch = """
     <style>
-      html, body {
-        width: 100% !important;
-        max-width: 100% !important;
-        overflow-x: hidden !important;
-      }
-      [class~="max-w-[1600px]"] { max-width: 100% !important; }
-      @media (min-width: 1024px) {
-        #sidebar {
-          position: static !important;
-          inset: auto !important;
-          transform: none !important;
-          max-height: none !important;
-          height: auto !important;
-          overflow: visible !important;
-          align-self: flex-start !important;
-        }
-      }
+      html,body{width:100%!important;max-width:100%!important;overflow-x:hidden!important}
+      [class~="max-w-[1600px]"]{max-width:100%!important}
+      @media(min-width:1024px){#sidebar{position:static!important;inset:auto!important;
+      transform:none!important;max-height:none!important;height:auto!important;
+      overflow:visible!important;align-self:flex-start!important}}
     </style>
     """
     return html.replace("</head>", patch + "\n</head>", 1)
 
 
-# -----------------------------------------------------------------------------
-# EJECUCIÓN
-# -----------------------------------------------------------------------------
 def main() -> None:
-    data = load_all_data()
-
+    data = load_data()
     admin_requested = str(st.query_params.get("admin", "0")) == "1"
+
     if admin_requested or st.session_state.get("admin_authenticated"):
         render_admin(data)
         st.stop()
 
     try:
-        html = load_dashboard_html()
+        html = load_html()
     except FileNotFoundError as exc:
         st.error(str(exc))
         st.stop()
 
-    html = inject_supabase_data(
+    html = inject_data(
         html,
-        contract_payload(data["contratos"], data["establecimientos"]),
-        official_plan_payload(
-            data["planes"],
-            data["plan_trabajo"],
-            data["establecimientos"],
-        ),
+        contracts_for_html(data["contratos"], data["establecimientos"]),
+        plans_for_html(data["plan_trabajo"], data["establecimientos"]),
+        latest_plan_metadata(data["planes"]),
     )
-    html = apply_layout_patch(html)
-
     components.html(html, height=4300, scrolling=False)
 
 
