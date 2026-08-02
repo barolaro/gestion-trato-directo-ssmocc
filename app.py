@@ -10,7 +10,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from supabase import Client, create_client
+import gspread
+from google.oauth2.service_account import Credentials
 
 
 st.set_page_config(
@@ -55,8 +56,43 @@ st.markdown(
 
 
 # -----------------------------------------------------------------------------
-# SUPABASE
+# GOOGLE SHEETS · CAPA DE DATOS
 # -----------------------------------------------------------------------------
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+SHEET_SCHEMAS: dict[str, list[str]] = {
+    "establecimientos": ["id", "nombre", "codigo", "activo"],
+    "contratos": [
+        "id", "establecimiento_id", "licitacion", "monto_adjudicado",
+        "fecha_adjudicacion", "duracion_meses", "anticipacion_renovacion",
+        "estado", "responsable", "observaciones", "ultima_actualizacion",
+    ],
+    "planes": [
+        "id", "nombre_archivo", "reporte", "periodo", "fecha_publicacion",
+        "establecimientos", "rojos", "amarillos", "verdes", "url_archivo",
+    ],
+    "plan_trabajo": [
+        "id", "establecimiento_id", "nivel", "acciones", "responsable",
+        "fecha_compromiso", "estado", "observaciones",
+    ],
+}
+
+DEFAULT_ESTABLISHMENTS = [
+    [1, "Hospital San Juan de Dios", "HSJD", "TRUE"],
+    [2, "Instituto Traumatológico", "IT", "TRUE"],
+    [3, "Hospital Dr. Félix Bulnes Cerda", "HFBC", "TRUE"],
+    [4, "Hospital de Talagante", "HTAL", "TRUE"],
+    [5, "Hospital de Peñaflor", "HPE", "TRUE"],
+    [6, "Hospital de Melipilla", "HMEL", "TRUE"],
+    [7, "Hospital de Curacaví", "HCUR", "TRUE"],
+    [8, "CRS Salvador Allende", "CRS", "TRUE"],
+    [9, "SSMOCC Dirección", "DSS", "TRUE"],
+]
+
+
 def secret(name: str, default: str = "") -> str:
     try:
         value = st.secrets.get(name, default)
@@ -65,22 +101,215 @@ def secret(name: str, default: str = "") -> str:
         return default
 
 
-@st.cache_resource
-def public_client() -> Client:
-    url = secret("SUPABASE_URL")
-    key = secret("SUPABASE_KEY")
-    if not url or not key:
-        raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_KEY en Streamlit Secrets.")
-    return create_client(url, key)
+def _coerce(value: Any) -> Any:
+    if isinstance(value, str):
+        value = value.strip()
+        if value.lower() == "true":
+            return True
+        if value.lower() == "false":
+            return False
+    return value
+
+
+def _to_cell(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    return value
+
+
+def _same_value(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is right
+    return str(left).strip() == str(right).strip()
+
+
+class SheetResult:
+    def __init__(self, data: list[dict[str, Any]]):
+        self.data = data
+
+
+class SheetQuery:
+    def __init__(self, worksheet: gspread.Worksheet):
+        self._ws = worksheet
+        self._operation = "select"
+        self._columns = "*"
+        self._payload: Any = None
+        self._filters: list[tuple[str, str, Any]] = []
+        self._limit: int | None = None
+
+    def select(self, columns: str = "*") -> "SheetQuery":
+        self._operation, self._columns = "select", columns
+        return self
+
+    def insert(self, payload: Any) -> "SheetQuery":
+        self._operation, self._payload = "insert", payload
+        return self
+
+    def update(self, payload: dict[str, Any]) -> "SheetQuery":
+        self._operation, self._payload = "update", payload
+        return self
+
+    def delete(self) -> "SheetQuery":
+        self._operation = "delete"
+        return self
+
+    def eq(self, column: str, value: Any) -> "SheetQuery":
+        self._filters.append(("eq", column, value))
+        return self
+
+    def neq(self, column: str, value: Any) -> "SheetQuery":
+        self._filters.append(("neq", column, value))
+        return self
+
+    def limit(self, count: int) -> "SheetQuery":
+        self._limit = count
+        return self
+
+    def _rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for index, record in enumerate(self._ws.get_all_records()):
+            row = {key: _coerce(value) for key, value in record.items()}
+            if row.get("id") not in ("", None):
+                try:
+                    row["id"] = int(row["id"])
+                except (TypeError, ValueError):
+                    pass
+            row["__rownum__"] = index + 2
+            rows.append(row)
+        return rows
+
+    def _matches(self, row: dict[str, Any]) -> bool:
+        for kind, column, expected in self._filters:
+            equal = _same_value(row.get(column), expected)
+            if (kind == "eq" and not equal) or (kind == "neq" and equal):
+                return False
+        return True
+
+    def execute(self) -> SheetResult:
+        if self._operation == "select":
+            rows = [row for row in self._rows() if self._matches(row)]
+            for row in rows:
+                row.pop("__rownum__", None)
+            if self._limit is not None:
+                rows = rows[:self._limit]
+            if self._columns != "*":
+                columns = [column.strip() for column in self._columns.split(",")]
+                rows = [{column: row.get(column) for column in columns} for row in rows]
+            return SheetResult(rows)
+
+        headers = self._ws.row_values(1)
+        if not headers:
+            raise RuntimeError(f"La hoja {self._ws.title} no tiene encabezados.")
+
+        if self._operation == "insert":
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload]
+            ids = [row["id"] for row in self._rows() if isinstance(row.get("id"), int)]
+            next_id = max(ids, default=0) + 1
+            values = []
+            for payload in payloads:
+                record = dict(payload)
+                if "id" in headers and not record.get("id"):
+                    record["id"] = next_id
+                    next_id += 1
+                values.append([_to_cell(record.get(header, "")) for header in headers])
+            if values:
+                self._ws.append_rows(values, value_input_option="RAW")
+            return SheetResult(payloads)
+
+        if self._operation == "update":
+            targets = [row for row in self._rows() if self._matches(row)]
+            for row in targets:
+                row_number = row["__rownum__"]
+                current = self._ws.row_values(row_number)
+                values = [
+                    _to_cell(self._payload[header])
+                    if header in self._payload
+                    else (current[index] if index < len(current) else "")
+                    for index, header in enumerate(headers)
+                ]
+                self._ws.update(
+                    range_name=f"A{row_number}",
+                    values=[values],
+                    value_input_option="RAW",
+                )
+            return SheetResult([self._payload])
+
+        if self._operation == "delete":
+            targets = [row for row in self._rows() if self._matches(row)]
+            for row in sorted(targets, key=lambda item: item["__rownum__"], reverse=True):
+                self._ws.delete_rows(row["__rownum__"])
+            return SheetResult([])
+
+        return SheetResult([])
+
+
+class SheetClient:
+    def __init__(self, spreadsheet: gspread.Spreadsheet):
+        self._spreadsheet = spreadsheet
+        self._worksheets: dict[str, gspread.Worksheet] = {}
+
+    def table(self, name: str) -> SheetQuery:
+        if name not in self._worksheets:
+            try:
+                worksheet = self._spreadsheet.worksheet(name)
+            except gspread.WorksheetNotFound:
+                headers = SHEET_SCHEMAS.get(name)
+                if not headers:
+                    raise RuntimeError(f"No existe la hoja '{name}'.")
+                worksheet = self._spreadsheet.add_worksheet(
+                    title=name, rows=200, cols=len(headers)
+                )
+                worksheet.update("A1", [headers], value_input_option="RAW")
+                if name == "establecimientos":
+                    worksheet.append_rows(
+                        DEFAULT_ESTABLISHMENTS, value_input_option="RAW"
+                    )
+            self._worksheets[name] = worksheet
+        return SheetQuery(self._worksheets[name])
 
 
 @st.cache_resource
-def service_client() -> Client | None:
-    url = secret("SUPABASE_URL")
-    key = secret("SUPABASE_SERVICE_KEY")
-    if not url or not key:
+def _spreadsheet() -> gspread.Spreadsheet | None:
+    account_info: dict[str, Any] = {}
+    try:
+        account_info = dict(st.secrets["gcp_service_account"])
+    except Exception:
+        raw_json = secret("GCP_SERVICE_ACCOUNT_JSON")
+        if raw_json:
+            try:
+                account_info = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "GCP_SERVICE_ACCOUNT_JSON no contiene un JSON válido."
+                ) from exc
+    sheet_id = secret("GSHEET_ID") or secret("GOOGLE_SHEET_ID")
+    if not account_info or not sheet_id:
         return None
-    return create_client(url, key)
+    credentials = Credentials.from_service_account_info(
+        account_info, scopes=GOOGLE_SCOPES
+    )
+    return gspread.authorize(credentials).open_by_key(sheet_id)
+
+
+@st.cache_resource
+def _sheet_client() -> SheetClient | None:
+    spreadsheet = _spreadsheet()
+    return SheetClient(spreadsheet) if spreadsheet is not None else None
+
+
+def public_client() -> SheetClient:
+    client = _sheet_client()
+    if client is None:
+        raise RuntimeError(
+            "Faltan gcp_service_account y GSHEET_ID en Streamlit Secrets."
+        )
+    return client
+
+
+def service_client() -> SheetClient | None:
+    return _sheet_client()
 
 
 def safe_read(table: str, columns: str = "*") -> list[dict[str, Any]]:
@@ -94,9 +323,11 @@ def safe_read(table: str, columns: str = "*") -> list[dict[str, Any]]:
 
 def load_data() -> dict[str, list[dict[str, Any]]]:
     try:
-        public_client().table("establecimientos").select("id").limit(1).execute()
+        client = public_client()
+        for table_name in SHEET_SCHEMAS:
+            client.table(table_name)
     except Exception as exc:
-        st.error(f"No fue posible conectar con Supabase: {exc}")
+        st.error(f"No fue posible conectar con Google Sheets: {exc}")
         return {
             "establecimientos": [],
             "contratos": [],
@@ -107,7 +338,7 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
     establishments = safe_read("establecimientos", "id,nombre,codigo,activo")
     return {
         "establecimientos": [
-            row for row in establishments if row.get("activo", True)
+            row for row in establishments if row.get("activo", True) not in (False, "")
         ],
         "contratos": safe_read("contratos"),
         "planes": safe_read("planes"),
@@ -326,7 +557,7 @@ def admin_login() -> bool:
 
 
 def render_contract_admin(
-    data: dict[str, list[dict[str, Any]]], db: Client
+    data: dict[str, list[dict[str, Any]]], db: SheetClient
 ) -> None:
     establishments = data["establecimientos"]
     contracts = data["contratos"]
@@ -336,7 +567,7 @@ def render_contract_admin(
         if row.get("nombre") and row.get("id") is not None
     }
     if not establishment_options:
-        st.error("No existen establecimientos disponibles en Supabase.")
+        st.error("No existen establecimientos disponibles en Google Sheets.")
         return
 
     id_to_name = {value: key for key, value in establishment_options.items()}
@@ -434,7 +665,7 @@ def render_contract_admin(
                 ).execute()
             else:
                 db.table("contratos").insert(payload).execute()
-            st.success("Contrato guardado correctamente en Supabase.")
+            st.success("Contrato guardado correctamente en Google Sheets.")
             st.rerun()
         except Exception as exc:
             st.error(f"No fue posible guardar el contrato: {exc}")
@@ -547,7 +778,7 @@ def parse_annex(
 
 
 def render_plan_admin(
-    data: dict[str, list[dict[str, Any]]], db: Client
+    data: dict[str, list[dict[str, Any]]], db: SheetClient
 ) -> None:
     st.subheader("☁️ Plan de trabajo oficial · Anexo N°1")
     st.info(
@@ -594,7 +825,7 @@ def render_plan_admin(
             st.error(f"No fue posible procesar el Anexo: {exc}")
 
     publish = st.button(
-        "☁️ Publicar plan oficial en Supabase",
+        "☁️ Publicar plan oficial en Google Sheets",
         type="primary",
         use_container_width=True,
         disabled=uploaded is None or not rows,
@@ -622,7 +853,7 @@ def render_plan_admin(
             db.table("plan_trabajo").insert(rows).execute()
             db.table("planes").insert(metadata).execute()
             st.success(
-                f"Plan publicado: {len(rows)} establecimientos guardados en Supabase."
+                f"Plan publicado: {len(rows)} establecimientos guardados en Google Sheets."
             )
             st.rerun()
         except Exception as exc:
@@ -638,7 +869,7 @@ def render_admin(data: dict[str, list[dict[str, Any]]]) -> None:
         return
     db = service_client()
     if db is None:
-        st.error("Falta configurar SUPABASE_SERVICE_KEY en Streamlit Secrets.")
+        st.error("Falta configurar gcp_service_account / GSHEET_ID en Streamlit Secrets.")
         return
 
     left, right = st.columns([6, 1])
@@ -725,8 +956,8 @@ def inject_native_data(
 
     preload = f"""
     <script>
-      window.__SUPABASE_CONTRACTS__ = {contracts_json};
-      window.__SUPABASE_PLAN__ = {plan_json};
+      window.__SHEETS_CONTRACTS__ = {contracts_json};
+      window.__SHEETS_PLAN__ = {plan_json};
     </script>
     """
     html = html.replace("</head>", preload + "\n</head>", 1)
@@ -734,18 +965,18 @@ def inject_native_data(
     html = replace_native_loader(
         html,
         "loadLic",
-        "function loadLic(){try{LIC=window.__SUPABASE_CONTRACTS__||{};}catch(e){LIC={};}}",
+        "function loadLic(){try{LIC=window.__SHEETS_CONTRACTS__||{};}catch(e){LIC={};}}",
     )
     html = replace_native_loader(
         html,
         "loadPlan",
-        "function loadPlan(){try{PLAN=window.__SUPABASE_PLAN__||{meta:null,items:[]};}catch(e){PLAN={meta:null,items:[]};}}",
+        "function loadPlan(){try{PLAN=window.__SHEETS_PLAN__||{meta:null,items:[]};}catch(e){PLAN={meta:null,items:[]};}}",
     )
 
-    # Respaldo: inicializa PLAN desde Supabase incluso si cambia el formato del loader.
+    # Respaldo: inicializa PLAN desde Google Sheets incluso si cambia el formato del loader.
     html = re.sub(
         r"let\s+PLAN\s*=\s*\{meta:null,items:\[\]\};",
-        "let PLAN=window.__SUPABASE_PLAN__||{meta:null,items:[]};",
+        "let PLAN=window.__SHEETS_PLAN__||{meta:null,items:[]};",
         html,
         count=1,
     )
