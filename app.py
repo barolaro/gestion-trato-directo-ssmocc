@@ -57,36 +57,35 @@ if dashboard_path is None:
 
 dashboard_html = dashboard_path.read_text(encoding="utf-8")
 
+# Elimina directamente las clases Tailwind que dejan fijo el menú lateral.
+dashboard_html = dashboard_html.replace(" lg:sticky", "")
+dashboard_html = dashboard_html.replace(" lg:top-[132px]", "")
+dashboard_html = dashboard_html.replace(" lg:max-h-[calc(100vh-152px)]", "")
+dashboard_html = dashboard_html.replace(" overflow-y-auto", "")
+
 responsive_patch = """
 <style>
   html, body {
     width: 100% !important;
     max-width: 100% !important;
     overflow-x: hidden !important;
-    overflow-y: visible !important;
   }
 
   [class~="max-w-[1600px]"] {
     max-width: 100% !important;
   }
 
-  /* En escritorio el panel lateral forma parte del flujo normal de la página. */
   @media (min-width: 821px) {
     #sidebar {
       position: static !important;
-      left: auto !important;
-      top: auto !important;
-      bottom: auto !important;
+      inset: auto !important;
       transform: none !important;
       max-height: none !important;
       height: auto !important;
       overflow: visible !important;
       width: 232px !important;
       flex: 0 0 232px !important;
-    }
-
-    #scrim {
-      display: none !important;
+      align-self: flex-start !important;
     }
   }
 
@@ -106,7 +105,6 @@ responsive_patch = """
     }
   }
 
-  /* El modo móvil queda disponible solo en pantallas realmente pequeñas. */
   @media (max-width: 820px) {
     #sidebar {
       position: fixed !important;
