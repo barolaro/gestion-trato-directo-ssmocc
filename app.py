@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import base64
+import csv
+import gzip
+import io
 import json
 import re
 import unicodedata
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -78,6 +83,11 @@ SHEET_SCHEMAS: dict[str, list[str]] = {
         "id", "establecimiento_id", "reporte", "periodo",
         "fecha_publicacion", "nivel", "acciones", "responsable",
         "fecha_compromiso", "estado", "observaciones",
+    ],
+    "datos_dashboard": ["id", "orden", "contenido"],
+    "cargas_mensuales": [
+        "id", "nombre_archivo", "fecha_carga", "registros",
+        "periodo_min", "periodo_max", "establecimientos",
     ],
 }
 
@@ -285,6 +295,30 @@ class SheetClient:
             self._worksheets[name] = worksheet
         return SheetQuery(self._worksheets[name])
 
+    def replace_records(
+        self, name: str, records: list[dict[str, Any]]
+    ) -> None:
+        """Reemplaza una tabla completa con una sola actualización eficiente."""
+        self.table(name)
+        worksheet = self._worksheets[name]
+        headers = SHEET_SCHEMAS[name]
+        values = [
+            [_to_cell(record.get(header, "")) for header in headers]
+            for record in records
+        ]
+        required_rows = max(2, len(values) + 1)
+        if worksheet.row_count < required_rows or worksheet.col_count < len(headers):
+            worksheet.resize(
+                rows=max(worksheet.row_count, required_rows),
+                cols=max(worksheet.col_count, len(headers)),
+            )
+        worksheet.clear()
+        worksheet.update(
+            range_name="A1",
+            values=[headers] + values,
+            value_input_option="RAW",
+        )
+
 
 @st.cache_resource
 def _spreadsheet() -> gspread.Spreadsheet | None:
@@ -349,6 +383,8 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
             "contratos": [],
             "planes": [],
             "plan_trabajo": [],
+            "cargas_mensuales": [],
+            "dataset_gzip_b64": "",
         }
 
     establishments = safe_read("establecimientos", "id,nombre,codigo,activo")
@@ -359,6 +395,8 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
         "contratos": safe_read("contratos"),
         "planes": safe_read("planes"),
         "plan_trabajo": safe_read("plan_trabajo"),
+        "cargas_mensuales": safe_read("cargas_mensuales"),
+        "dataset_gzip_b64": load_dashboard_dataset_b64(),
     }
 
 
@@ -374,6 +412,164 @@ def normalize(value: Any) -> str:
     )
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def load_dashboard_dataset_b64() -> str:
+    """Reconstruye el dataset comprimido guardado por fragmentos."""
+    try:
+        chunks = safe_read("datos_dashboard", "orden,contenido")
+        chunks.sort(key=lambda row: int(row.get("orden") or 0))
+        return "".join(str(row.get("contenido") or "") for row in chunks)
+    except Exception:
+        return ""
+
+
+def _market_number(value: Any) -> float:
+    text = str(value or "").strip().strip('"').replace(".", "").replace(",", ".")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+DASHBOARD_ESTABLISHMENTS = {
+    "hospital de curacavi": "Curacaví",
+    "centro referencia salud doctor salvador allende g": "CRS S. Allende",
+    "hospital de penaflor": "Peñaflor",
+    "hospital de melipilla": "Melipilla",
+    "hospital dr felix bulnes cerda": "Félix Bulnes",
+    "servicio de salud metropolitano occidente": "SSMOCC (Dirección)",
+    "hospital de talagante": "Talagante",
+    "hospital san juan de dios": "San Juan de Dios",
+    "instituto traumatologico": "Inst. Traumatológico",
+}
+
+
+def _decode_csv(data: bytes) -> str:
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
+@st.cache_data(show_spinner=False)
+def parse_market_package(
+    file_name: str, file_bytes: bytes
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Procesa un ZIP o CSV exportado desde Mercado Público."""
+    sources: list[tuple[str, bytes]] = []
+    if file_name.lower().endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            members = [
+                info for info in archive.infolist()
+                if not info.is_dir() and info.filename.lower().endswith(".csv")
+            ]
+            if not members:
+                raise ValueError("El ZIP no contiene archivos CSV.")
+            if sum(info.file_size for info in members) > 200 * 1024 * 1024:
+                raise ValueError("El contenido descomprimido supera el límite de 200 MB.")
+            sources = [(info.filename, archive.read(info)) for info in members]
+    elif file_name.lower().endswith(".csv"):
+        sources = [(file_name, file_bytes)]
+    else:
+        raise ValueError("Debes seleccionar un archivo ZIP o CSV.")
+
+    output: list[dict[str, Any]] = []
+    months: set[str] = set()
+    establishments: set[str] = set()
+
+    for source_name, content in sources:
+        reader = csv.reader(
+            io.StringIO(_decode_csv(content)), delimiter=";", quotechar='"'
+        )
+        for index, row in enumerate(reader):
+            if index == 0 and any(
+                str(cell).strip().upper() == "OC" for cell in row
+            ):
+                continue
+            if len(row) < 18:
+                continue
+
+            organization = normalize(row[11])
+            establishment = DASHBOARD_ESTABLISHMENTS.get(
+                organization, str(row[11] or "").strip()
+            )
+            if not establishment:
+                continue
+
+            sent_date = str(row[6] or "").strip()[:10]
+            if len(sent_date) >= 7:
+                months.add(sent_date[:7])
+            establishments.add(establishment)
+
+            record: dict[str, Any] = {
+                "e": establishment,
+                "oc": str(row[0] or "").strip(),
+                "c": str(row[1] or "").strip().upper(),
+                "s": str(row[4] or "").strip().upper(),
+                "f": sent_date,
+                "li": str(row[2] or "").strip()[:24],
+                "p": str(row[9] or "").strip()[:120],
+                "pr": str(row[13] or "").strip()[:60],
+                "rp": str(row[14] or "").strip(),
+                "q": round(_market_number(row[15]), 2),
+                "u": round(_market_number(row[16]), 2),
+                "t": round(_market_number(row[17])),
+            }
+            currency = str(row[3] or "").strip().upper()
+            if currency and currency != "PESO CHILENO":
+                record["m"] = (
+                    "USD" if "DOLAR" in currency
+                    else "UF" if "FOMENTO" in currency
+                    else currency
+                )
+            output.append(record)
+
+    if not output:
+        raise ValueError(
+            "No se encontraron filas válidas con el formato de Mercado Público."
+        )
+
+    stats = {
+        "files": len(sources),
+        "records": len(output),
+        "months": sorted(months),
+        "establishments": sorted(establishments),
+    }
+    return output, stats
+
+
+def store_dashboard_dataset(
+    db: SheetClient,
+    rows: list[dict[str, Any]],
+    file_name: str,
+    stats: dict[str, Any],
+) -> None:
+    raw = json.dumps(
+        rows, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    compressed = base64.b64encode(gzip.compress(raw, compresslevel=6)).decode("ascii")
+    chunk_size = 45000
+    chunks = [
+        {
+            "id": index + 1,
+            "orden": index + 1,
+            "contenido": compressed[start:start + chunk_size],
+        }
+        for index, start in enumerate(range(0, len(compressed), chunk_size))
+    ]
+    db.replace_records("datos_dashboard", chunks)
+    months = stats.get("months") or []
+    db.table("cargas_mensuales").insert({
+        "nombre_archivo": file_name,
+        "fecha_carga": datetime.now().isoformat(timespec="seconds"),
+        "registros": len(rows),
+        "periodo_min": months[0] if months else "",
+        "periodo_max": months[-1] if months else "",
+        "establecimientos": len(stats.get("establishments") or []),
+    }).execute()
 
 
 def level_name(value: Any) -> str:
@@ -845,6 +1041,72 @@ def parse_annex(
     return rows, counts, sorted(set(unmatched)), detected_period
 
 
+def render_monthly_admin(
+    data: dict[str, Any], db: SheetClient
+) -> None:
+    st.subheader("📦 Actualización mensual del dashboard")
+    st.info(
+        "Carga el ZIP acumulado de los establecimientos o un CSV de Mercado "
+        "Público. La publicación reemplaza la base central vigente para evitar "
+        "duplicados y actualiza todos los indicadores del dashboard."
+    )
+
+    loads = data.get("cargas_mensuales") or []
+    if loads:
+        latest = max(loads, key=lambda row: int(row.get("id") or 0))
+        st.success(
+            f"Base vigente: {latest.get('nombre_archivo') or 'Carga masiva'} · "
+            f"{int(latest.get('registros') or 0):,} registros · "
+            f"{latest.get('establecimientos') or 0} establecimientos · "
+            f"actualizada {latest.get('fecha_carga') or ''}."
+        )
+
+    uploaded = st.file_uploader(
+        "Seleccionar base masiva", type=["zip", "csv"], key="monthly_database"
+    )
+    rows: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {}
+
+    if uploaded is not None:
+        try:
+            with st.spinner("Validando y procesando la base..."):
+                rows, stats = parse_market_package(
+                    uploaded.name, uploaded.getvalue()
+                )
+            months = stats.get("months") or []
+            period = (
+                f"{months[0]} a {months[-1]}" if months else "Sin período detectado"
+            )
+            st.success(
+                f"Archivo validado: {stats['files']} CSV · "
+                f"{stats['records']:,} registros · "
+                f"{len(stats['establishments'])} establecimientos · {period}."
+            )
+            with st.expander("Ver establecimientos detectados"):
+                st.write(", ".join(stats["establishments"]))
+        except Exception as exc:
+            st.error(f"No fue posible procesar la base: {exc}")
+
+    publish = st.button(
+        "☁️ Publicar y actualizar dashboard",
+        type="primary",
+        use_container_width=True,
+        disabled=uploaded is None or not rows,
+    )
+    if publish and uploaded is not None:
+        try:
+            with st.spinner("Comprimiendo y guardando la base central..."):
+                store_dashboard_dataset(db, rows, uploaded.name, stats)
+            st.success(
+                f"Base publicada correctamente: {len(rows):,} registros. "
+                "El dashboard se actualizará al volver."
+            )
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible publicar la base: {exc}")
+
+
 def render_plan_admin(
     data: dict[str, list[dict[str, Any]]], db: SheetClient
 ) -> None:
@@ -986,11 +1248,13 @@ def render_admin(data: dict[str, list[dict[str, Any]]]) -> None:
         st.query_params.clear()
         st.rerun()
 
-    contracts_tab, plan_tab = st.tabs(
-        ["📄 Gestión contractual", "☁️ Plan oficial"]
+    contracts_tab, monthly_tab, plan_tab = st.tabs(
+        ["📄 Gestión contractual", "📦 Actualización mensual", "☁️ Plan oficial"]
     )
     with contracts_tab:
         render_contract_admin(data, db)
+    with monthly_tab:
+        render_monthly_admin(data, db)
     with plan_tab:
         render_plan_admin(data, db)
 
@@ -1054,6 +1318,7 @@ def inject_native_data(
     contract_payload: dict[str, dict[str, Any]],
     plan_payload: dict[str, Any],
     plan_history: list[dict[str, Any]],
+    dataset_gzip_b64: str,
 ) -> str:
     contracts_json = json.dumps(
         contract_payload, ensure_ascii=False, separators=(",", ":")
@@ -1070,6 +1335,7 @@ def inject_native_data(
       window.__SHEETS_CONTRACTS__ = {contracts_json};
       window.__SHEETS_PLAN__ = {plan_json};
       window.__SHEETS_PLAN_HISTORY__ = {history_json};
+      window.__SHEETS_ROWS_GZIP__ = ${json.dumps(dataset_gzip_b64)};
 
       function ssmoccPublishedReportNumbers() {{
         return new Set((window.__SHEETS_PLAN_HISTORY__ || []).map(plan => {{
@@ -1176,6 +1442,19 @@ def inject_native_data(
     </script>
     """
     html = html.replace("</head>", preload + "\n</head>", 1)
+
+    html = html.replace(
+        "META=D.meta.map(m=>Object.assign({},m)); BASE=D.rows;",
+        "META=D.meta.map(m=>Object.assign({},m));"
+        "if(window.__SHEETS_ROWS_GZIP__){"
+        "const centralBin=Uint8Array.from(atob(window.__SHEETS_ROWS_GZIP__),"
+        "c=>c.charCodeAt(0));"
+        "const centralStream=new Blob([centralBin]).stream()"
+        ".pipeThrough(new DecompressionStream('gzip'));"
+        "BASE=JSON.parse(await new Response(centralStream).text());"
+        "}else{BASE=D.rows;}",
+        1,
+    )
 
     html = replace_native_loader(
         html,
@@ -1299,6 +1578,7 @@ def main() -> None:
         plan_history_for_html(
             data["planes"], data["plan_trabajo"], data["establecimientos"]
         ),
+        str(data.get("dataset_gzip_b64") or ""),
     )
     html = apply_layout_patch(html)
     components.html(html, height=4300, scrolling=False)
