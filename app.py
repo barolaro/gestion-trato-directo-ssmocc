@@ -1071,6 +1071,46 @@ def inject_native_data(
       window.__SHEETS_PLAN__ = {plan_json};
       window.__SHEETS_PLAN_HISTORY__ = {history_json};
 
+      function ssmoccPublishedReportNumbers() {{
+        return new Set((window.__SHEETS_PLAN_HISTORY__ || []).map(plan => {{
+          const label = String((plan.meta || {{}}).reporte || '');
+          const match = label.match(/(\\d+)/);
+          return match ? Number(match[1]) : null;
+        }}).filter(Boolean));
+      }}
+
+      function ssmoccRefreshReportStatus() {{
+        const calendar = document.getElementById('td-calendar');
+        if (!calendar) return;
+        const published = ssmoccPublishedReportNumbers();
+        Array.from(calendar.children).forEach((card, index) => {{
+          const reportNumber = index + 1;
+          if (!published.has(reportNumber) || card.dataset.reportPublished === '1') {{
+            return;
+          }}
+          card.dataset.reportPublished = '1';
+          card.style.borderLeftColor = '#2e7d32';
+          const header = card.children[0];
+          const badge = header && header.children[1];
+          if (badge) {{
+            badge.style.background = '#2e7d321a';
+            badge.style.color = '#2e7d32';
+            badge.innerHTML = '<i class="fa-solid fa-circle-check mr-1"></i>Entregado';
+          }}
+          const statusLine = card.children[3];
+          if (statusLine) {{
+            statusLine.style.color = '#2e7d32';
+            statusLine.textContent = 'Reporte cerrado y antecedentes remitidos';
+          }}
+        }});
+      }}
+
+      document.addEventListener('DOMContentLoaded', function() {{
+        const observer = new MutationObserver(ssmoccRefreshReportStatus);
+        observer.observe(document.body, {{childList:true, subtree:true}});
+        ssmoccRefreshReportStatus();
+      }});
+
       document.addEventListener('click', function(event) {{
         const card = event.target.closest('#td-calendar > div');
         if (!card) return;
@@ -1083,11 +1123,42 @@ def inject_native_data(
           return match && Number(match[1]) === reportNumber;
         }});
         if (!selected) {{
+          window.__SHEETS_ACTIVE_REPORT__ = reportNumber;
+          const periods = {{
+            1: 'Enero–Marzo', 2: 'Abril–Junio',
+            3: 'Julio–Septiembre', 4: 'Octubre–Diciembre'
+          }};
+          const selector = document.getElementById('td-plan-sel');
+          if (selector) {{
+            selector.innerHTML =
+              '<option>Reporte ' + reportNumber + ' · Plan no disponible</option>';
+            selector.disabled = true;
+          }}
+          const planBox = document.getElementById('td-plan');
+          if (planBox) {{
+            planBox.innerHTML =
+              '<div class="border border-slate-200 bg-slate-50 rounded-xl px-5 py-6 text-center">' +
+              '<div class="w-12 h-12 mx-auto mb-3 rounded-full bg-blue-50 text-govblue grid place-items-center">' +
+              '<i class="fa-solid fa-calendar-clock text-xl"></i></div>' +
+              '<div class="font-tight font-bold text-slate-800 text-[17px]">Plan aún no disponible</div>' +
+              '<p class="text-[13px] text-slate-500 mt-2 max-w-xl mx-auto">' +
+              'El Anexo N°1 correspondiente al ' + reportNumber + '° Reporte (' +
+              periods[reportNumber] + ') todavía no ha sido publicado. ' +
+              'La información estará disponible una vez finalizado el proceso de recepción y validación.</p>' +
+              '</div>';
+          }}
+          Array.from(card.parentElement.children).forEach((item, index) => {{
+            item.classList.toggle(
+              'ssmocc-report-selected', index + 1 === reportNumber
+            );
+          }});
           if (typeof toast === 'function') {{
-            toast('Aún no existe un Anexo N°1 publicado para el reporte ' + reportNumber, true);
+            toast('El plan del reporte ' + reportNumber + ' aún no está disponible');
           }}
           return;
         }}
+        const selector = document.getElementById('td-plan-sel');
+        if (selector) selector.disabled = false;
         window.__SHEETS_PLAN__ = selected;
         window.__SHEETS_ACTIVE_REPORT__ = reportNumber;
         if (typeof PLAN !== 'undefined') PLAN = selected;
