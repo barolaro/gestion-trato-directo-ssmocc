@@ -75,7 +75,8 @@ SHEET_SCHEMAS: dict[str, list[str]] = {
         "establecimientos", "rojos", "amarillos", "verdes", "url_archivo",
     ],
     "plan_trabajo": [
-        "id", "establecimiento_id", "nivel", "acciones", "responsable",
+        "id", "establecimiento_id", "reporte", "periodo",
+        "fecha_publicacion", "nivel", "acciones", "responsable",
         "fecha_compromiso", "estado", "observaciones",
     ],
 }
@@ -266,6 +267,18 @@ class SheetClient:
                     worksheet.append_rows(
                         DEFAULT_ESTABLISHMENTS, value_input_option="RAW"
                     )
+            expected_headers = SHEET_SCHEMAS.get(name, [])
+            existing_headers = worksheet.row_values(1)
+            missing_headers = [
+                header for header in expected_headers if header not in existing_headers
+            ]
+            if missing_headers:
+                first_column = len(existing_headers) + 1
+                worksheet.update(
+                    range_name=gspread.utils.rowcol_to_a1(1, first_column),
+                    values=[missing_headers],
+                    value_input_option="RAW",
+                )
             self._worksheets[name] = worksheet
         return SheetQuery(self._worksheets[name])
 
@@ -535,6 +548,58 @@ def plan_for_html(
 # -----------------------------------------------------------------------------
 # ADMINISTRACIÓN
 # -----------------------------------------------------------------------------
+def plan_history_for_html(
+    planes: list[dict[str, Any]],
+    plan_rows: list[dict[str, Any]],
+    establishments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Construye un plan independiente para cada reporte y período publicado."""
+    if not planes:
+        return []
+
+    latest_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for metadata in sorted(
+        planes,
+        key=lambda row: (
+            str(row.get("fecha_publicacion") or ""),
+            int(row.get("id") or 0),
+        ),
+    ):
+        key = (
+            normalize(metadata.get("reporte")),
+            normalize(metadata.get("periodo")),
+        )
+        latest_by_key[key] = metadata
+
+    latest_metadata = latest_plan(planes)
+    history: list[dict[str, Any]] = []
+    for key, metadata in latest_by_key.items():
+        details = [
+            row for row in plan_rows
+            if (
+                normalize(row.get("reporte")),
+                normalize(row.get("periodo")),
+            ) == key
+        ]
+        # Compatibilidad con el primer Anexo cargado antes de habilitar historial.
+        if metadata is latest_metadata:
+            details.extend(
+                row for row in plan_rows
+                if not row.get("reporte") and not row.get("periodo")
+            )
+        payload = plan_for_html([metadata], details, establishments)
+        if payload.get("items"):
+            history.append(payload)
+
+    def report_order(payload: dict[str, Any]) -> tuple[int, str]:
+        report = str((payload.get("meta") or {}).get("reporte") or "")
+        match = re.search(r"(\d+)", report)
+        number = int(match.group(1)) if match else 99
+        return number, str((payload.get("meta") or {}).get("ts") or "")
+
+    return sorted(history, key=report_order)
+
+
 def admin_login() -> bool:
     configured = secret("ADMIN_PASSWORD")
     if not configured:
@@ -844,12 +909,51 @@ def render_plan_admin(
             "url_archivo": "",
         }
         try:
-            existing = db.table("plan_trabajo").select("id").execute().data or []
-            for record in existing:
-                if record.get("id") is not None:
+            # Etiqueta las filas antiguas del primer reporte para no perderlas.
+            existing_plans = db.table("planes").select("*").execute().data or []
+            previous = latest_plan(existing_plans)
+            existing_rows = db.table("plan_trabajo").select("*").execute().data or []
+            if previous:
+                for record in existing_rows:
+                    if (
+                        record.get("id") is not None
+                        and not record.get("reporte")
+                        and not record.get("periodo")
+                    ):
+                        db.table("plan_trabajo").update({
+                            "reporte": str(previous.get("reporte") or ""),
+                            "periodo": str(previous.get("periodo") or ""),
+                            "fecha_publicacion": str(
+                                previous.get("fecha_publicacion") or ""
+                            ),
+                        }).eq("id", record["id"]).execute()
+                existing_rows = (
+                    db.table("plan_trabajo").select("*").execute().data or []
+                )
+
+            # Republicar reemplaza únicamente el mismo reporte y período.
+            for record in existing_rows:
+                if (
+                    record.get("id") is not None
+                    and normalize(record.get("reporte")) == normalize(metadata["reporte"])
+                    and normalize(record.get("periodo")) == normalize(metadata["periodo"])
+                ):
                     db.table("plan_trabajo").delete().eq(
                         "id", record["id"]
                     ).execute()
+            for record in existing_plans:
+                if (
+                    record.get("id") is not None
+                    and normalize(record.get("reporte")) == normalize(metadata["reporte"])
+                    and normalize(record.get("periodo")) == normalize(metadata["periodo"])
+                ):
+                    db.table("planes").delete().eq("id", record["id"]).execute()
+
+            for row in rows:
+                row["reporte"] = metadata["reporte"]
+                row["periodo"] = metadata["periodo"]
+                row["fecha_publicacion"] = metadata["fecha_publicacion"]
+
             db.table("plan_trabajo").insert(rows).execute()
             db.table("planes").insert(metadata).execute()
             st.success(
@@ -946,6 +1050,7 @@ def inject_native_data(
     html: str,
     contract_payload: dict[str, dict[str, Any]],
     plan_payload: dict[str, Any],
+    plan_history: list[dict[str, Any]],
 ) -> str:
     contracts_json = json.dumps(
         contract_payload, ensure_ascii=False, separators=(",", ":")
@@ -953,11 +1058,38 @@ def inject_native_data(
     plan_json = json.dumps(
         plan_payload, ensure_ascii=False, separators=(",", ":")
     ).replace("</", "<\\/")
+    history_json = json.dumps(
+        plan_history, ensure_ascii=False, separators=(",", ":")
+    ).replace("</", "<\\/")
 
     preload = f"""
     <script>
       window.__SHEETS_CONTRACTS__ = {contracts_json};
       window.__SHEETS_PLAN__ = {plan_json};
+      window.__SHEETS_PLAN_HISTORY__ = {history_json};
+
+      document.addEventListener('click', function(event) {{
+        const card = event.target.closest('#td-calendar > div');
+        if (!card) return;
+        const cards = Array.from(card.parentElement.children);
+        const reportNumber = cards.indexOf(card) + 1;
+        const history = window.__SHEETS_PLAN_HISTORY__ || [];
+        const selected = history.find(plan => {{
+          const label = String((plan.meta || {{}}).reporte || '');
+          const match = label.match(/(\\d+)/);
+          return match && Number(match[1]) === reportNumber;
+        }});
+        if (!selected) {{
+          if (typeof toast === 'function') {{
+            toast('Aún no existe un Anexo N°1 publicado para el reporte ' + reportNumber, true);
+          }}
+          return;
+        }}
+        window.__SHEETS_PLAN__ = selected;
+        if (typeof PLAN !== 'undefined') PLAN = selected;
+        if (typeof tdState !== 'undefined') tdState.planSel = null;
+        if (typeof renderTD === 'function') renderTD();
+      }});
     </script>
     """
     html = html.replace("</head>", preload + "\n</head>", 1)
@@ -1048,6 +1180,9 @@ def main() -> None:
         html,
         contracts_for_html(data["contratos"], data["establecimientos"]),
         plan_for_html(
+            data["planes"], data["plan_trabajo"], data["establecimientos"]
+        ),
+        plan_history_for_html(
             data["planes"], data["plan_trabajo"], data["establecimientos"]
         ),
     )
