@@ -73,13 +73,8 @@ def service_client() -> Client | None:
     return create_client(url, key)
 
 
-def database_client() -> Client:
-    """Usa la clave de servicio en el servidor y la pública como respaldo."""
-    return service_client() or public_client()
-
-
 def read_rows(table: str, columns: str = "*") -> list[dict[str, Any]]:
-    result = database_client().table(table).select(columns).execute()
+    result = public_client().table(table).select(columns).execute()
     return list(result.data or [])
 
 
@@ -93,7 +88,7 @@ def safe_read(table: str, columns: str = "*") -> list[dict[str, Any]]:
 
 def load_data() -> dict[str, list[dict[str, Any]]]:
     try:
-        database_client().table("establecimientos").select("id").limit(1).execute()
+        public_client().table("establecimientos").select("id").limit(1).execute()
     except Exception as exc:
         st.error(f"No fue posible conectar con Supabase: {exc}")
         return {"establecimientos": [], "contratos": [], "planes": [], "plan_trabajo": []}
@@ -402,8 +397,7 @@ def build_plan_rows(
 def render_plan_admin(data: dict[str, list[dict[str, Any]]], db: Client) -> None:
     st.subheader("☁️ Plan de trabajo oficial · Anexo N°1")
     st.info(
-        "Publique nuevamente el archivo desde este módulo. El administrador antiguo del HTML "
-        "solo guardaba información en el navegador y no en Supabase."
+        "Publique el archivo desde este módulo para guardarlo realmente en Supabase."
     )
 
     uploaded = st.file_uploader("Seleccionar Anexo N°1", type=["xlsx", "xls", "csv"])
@@ -533,28 +527,14 @@ def inject_data(
       function ssmoccCurrentPlan() {{
         const rows = window.__SUPABASE_PLAN_ROWS__ || [];
         if (!rows.length) return null;
-
         const selected = [...document.querySelectorAll('select')]
           .map(el => el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex].textContent : '')
           .filter(Boolean).join(' ');
         const pageText = document.body ? document.body.innerText : '';
         const source = ssmoccNorm(selected + ' ' + pageText);
-
-        const aliases = {{
-          'hospital dr felix bulnes cerda': ['felix bulnes','hospital felix bulnes'],
-          'hospital san juan de dios': ['san juan de dios'],
-          'hospital de talagante': ['talagante'],
-          'hospital de melipilla': ['melipilla'],
-          'hospital de penaflor': ['penaflor'],
-          'crs salvador allende': ['crs s allende','crs salvador allende'],
-          'instituto traumatologico': ['inst traumatologico','instituto traumatologico'],
-          'ssmocc direccion': ['ssmocc direccion']
-        }};
-
         for (const row of rows) {{
-          const key = ssmoccNorm(row.establecimiento);
-          const candidates = [key, ...(aliases[key] || [])].map(ssmoccNorm);
-          if (candidates.some(candidate => candidate && source.includes(candidate))) return row;
+          const candidate = ssmoccNorm(row.establecimiento);
+          if (candidate && source.includes(candidate)) return row;
         }}
         return rows[0];
       }}
@@ -562,24 +542,20 @@ def inject_data(
       function ssmoccRenderPlan() {{
         const row = ssmoccCurrentPlan();
         if (!row) return;
-
         const pending = [...document.querySelectorAll('div,p,span')].find(el =>
           ssmoccVisible(el) && ssmoccNorm(el.textContent).includes('plan comprometido pendiente')
         );
         if (!pending) return;
-
         let target = pending;
         while (target.parentElement && target.parentElement.textContent.trim() === pending.textContent.trim()) {{
           target = target.parentElement;
         }}
-
         const actions = row.acciones
           ? row.acciones.split(/\\n|•|;/).map(x => x.trim()).filter(Boolean)
           : [];
         const actionHtml = actions.length
           ? '<ul style="margin:8px 0 0 20px">' + actions.map(x => '<li style="margin:5px 0">' + x + '</li>').join('') + '</ul>'
           : '<p style="margin:8px 0 0">Sin acciones informadas.</p>';
-
         target.innerHTML = `
           <div style="padding:16px 18px;border:1px solid #b9d7f2;border-radius:12px;background:#f7fbff;color:#334155">
             <div style="font-weight:800;color:#0b4f87;margin-bottom:6px">✅ Plan comprometido oficial</div>
@@ -588,7 +564,6 @@ def inject_data(
             ${{row.responsable ? `<div style="margin-top:8px"><b>Responsable:</b> ${{row.responsable}}</div>` : ''}}
             ${{row.fecha ? `<div style="margin-top:8px"><b>Fecha compromiso:</b> ${{row.fecha}}</div>` : ''}}
           </div>`;
-        target.dataset.supabasePlan = row.key || row.establecimiento;
       }}
 
       document.addEventListener('click', function(event) {{
