@@ -1335,7 +1335,7 @@ def inject_native_data(
       window.__SHEETS_CONTRACTS__ = {contracts_json};
       window.__SHEETS_PLAN__ = {plan_json};
       window.__SHEETS_PLAN_HISTORY__ = {history_json};
-      window.__SHEETS_ROWS_GZIP__ = ${json.dumps(dataset_gzip_b64)};
+      window.__SHEETS_ROWS_GZIP__ = {json.dumps(dataset_gzip_b64)};
 
       function ssmoccPublishedReportNumbers() {{
         return new Set((window.__SHEETS_PLAN_HISTORY__ || []).map(plan => {{
