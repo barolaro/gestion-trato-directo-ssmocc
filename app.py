@@ -63,6 +63,19 @@ dashboard_html = dashboard_html.replace(" lg:top-[132px]", "")
 dashboard_html = dashboard_html.replace(" lg:max-h-[calc(100vh-152px)]", "")
 dashboard_html = dashboard_html.replace(" overflow-y-auto", "")
 
+# Sincroniza la fila elegida en el semáforo con el Plan de trabajo.
+old_row_handler = (
+    "tb.querySelectorAll('tr[data-e]').forEach(tr=>tr.onclick=()=>{"
+    "tdState.selected=tr.dataset.e;renderTD();});"
+)
+new_row_handler = (
+    "tb.querySelectorAll('tr[data-e]').forEach(tr=>tr.onclick=()=>{"
+    "tdState.selected=tr.dataset.e;"
+    "tdState.planSel=tr.dataset.e;"
+    "renderTD();});"
+)
+dashboard_html = dashboard_html.replace(old_row_handler, new_row_handler, 1)
+
 responsive_patch = """
 <style>
   html, body {
