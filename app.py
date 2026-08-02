@@ -1319,6 +1319,7 @@ def inject_native_data(
     plan_payload: dict[str, Any],
     plan_history: list[dict[str, Any]],
     dataset_gzip_b64: str,
+    coverage_period_max: str,
 ) -> str:
     contracts_json = json.dumps(
         contract_payload, ensure_ascii=False, separators=(",", ":")
@@ -1336,6 +1337,7 @@ def inject_native_data(
       window.__SHEETS_PLAN__ = {plan_json};
       window.__SHEETS_PLAN_HISTORY__ = {history_json};
       window.__SHEETS_ROWS_GZIP__ = {json.dumps(dataset_gzip_b64)};
+      window.__SHEETS_COVERAGE_MAX__ = {json.dumps(coverage_period_max)};
 
       function ssmoccPublishedReportNumbers() {{
         return new Set((window.__SHEETS_PLAN_HISTORY__ || []).map(plan => {{
@@ -1452,6 +1454,10 @@ def inject_native_data(
         "const centralStream=new Blob([centralBin]).stream()"
         ".pipeThrough(new DecompressionStream('gzip'));"
         "BASE=JSON.parse(await new Response(centralStream).text());"
+        "const coverage=String(window.__SHEETS_COVERAGE_MAX__||'');"
+        "if(/^\\d{4}-\\d{2}$/.test(coverage)){"
+        "BASE=BASE.filter(r=>!r.f||String(r.f).slice(0,7)<=coverage);"
+        "}"
         "}else{BASE=D.rows;}",
         1,
     )
@@ -1589,6 +1595,13 @@ def main() -> None:
             data["planes"], data["plan_trabajo"], data["establecimientos"]
         ),
         str(data.get("dataset_gzip_b64") or ""),
+        max(
+            (
+                str(row.get("periodo_max") or "")
+                for row in data.get("cargas_mensuales", [])
+            ),
+            default="",
+        ),
     )
     html = apply_layout_patch(html)
     components.html(html, height=4300, scrolling=False)
