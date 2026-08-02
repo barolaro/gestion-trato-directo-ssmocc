@@ -1089,9 +1089,18 @@ def inject_native_data(
           return;
         }}
         window.__SHEETS_PLAN__ = selected;
+        window.__SHEETS_ACTIVE_REPORT__ = reportNumber;
         if (typeof PLAN !== 'undefined') PLAN = selected;
         if (typeof tdState !== 'undefined') tdState.planSel = null;
         if (typeof renderTD === 'function') renderTD();
+        setTimeout(function() {{
+          const currentCards = document.querySelectorAll('#td-calendar > div');
+          currentCards.forEach((item, index) => {{
+            item.classList.toggle(
+              'ssmocc-report-selected', index + 1 === reportNumber
+            );
+          }});
+        }}, 0);
       }});
     </script>
     """
@@ -1149,6 +1158,30 @@ def apply_layout_patch(html: str) -> str:
         overflow-x: hidden !important;
       }
       [class~="max-w-[1600px]"] { max-width: 100% !important; }
+      #td-calendar > div {
+        cursor: pointer !important;
+        position: relative;
+        transition: transform .15s ease, box-shadow .15s ease;
+      }
+      #td-calendar > div:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 18px rgba(15, 23, 42, .10);
+      }
+      #td-calendar > div::after {
+        content: "Seleccionar reporte";
+        display: block;
+        margin-top: 8px;
+        font-size: 11px;
+        font-weight: 700;
+        color: #0063af;
+      }
+      #td-calendar > div.ssmocc-report-selected {
+        outline: 3px solid rgba(0, 99, 175, .28);
+        background: #f0f8ff;
+      }
+      #td-calendar > div.ssmocc-report-selected::after {
+        content: "Reporte seleccionado";
+      }
       @media (min-width: 1024px) {
         #sidebar {
           position: static !important;
