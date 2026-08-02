@@ -13,24 +13,28 @@ La aplicación utiliza Google Sheets como base de datos y ya no necesita Supabas
 
 ## 2. Configurar Streamlit Secrets
 
-En Streamlit Cloud abre **App > Settings > Secrets** y agrega:
+En Streamlit Cloud abre **App > Settings > Secrets**. Copia el contenido completo
+del archivo JSON descargado y pégalo entre las comillas triples:
 
 ```toml
 GSHEET_ID = "ID_DE_LA_PLANILLA"
 ADMIN_PASSWORD = "TU_CLAVE_ADMINISTRATIVA"
 
-[gcp_service_account]
-type = "service_account"
-project_id = "tu-proyecto"
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-client_email = "cuenta-servicio@tu-proyecto.iam.gserviceaccount.com"
-client_id = "..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "..."
-universe_domain = "googleapis.com"
+GCP_SERVICE_ACCOUNT_JSON = '''
+{
+  "type": "service_account",
+  "project_id": "...",
+  "private_key_id": "...",
+  "private_key": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n",
+  "client_email": "...",
+  "client_id": "...",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "...",
+  "universe_domain": "googleapis.com"
+}
+'''
 ```
 
 No publiques la clave JSON ni los Secrets en GitHub.
