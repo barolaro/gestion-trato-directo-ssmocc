@@ -126,6 +126,6 @@ dashboard_html = dashboard_html.replace(
 
 components.html(
     dashboard_html,
-    height=5200,
+    height=3200,
     scrolling=True,
 )
