@@ -272,10 +272,18 @@ class SheetClient:
 
 @st.cache_resource
 def _spreadsheet() -> gspread.Spreadsheet | None:
+    account_info: dict[str, Any] = {}
     try:
         account_info = dict(st.secrets["gcp_service_account"])
     except Exception:
-        return None
+        raw_json = secret("GCP_SERVICE_ACCOUNT_JSON")
+        if raw_json:
+            try:
+                account_info = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "GCP_SERVICE_ACCOUNT_JSON no contiene un JSON válido."
+                ) from exc
     sheet_id = secret("GSHEET_ID") or secret("GOOGLE_SHEET_ID")
     if not account_info or not sheet_id:
         return None
