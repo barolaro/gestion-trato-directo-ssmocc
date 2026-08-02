@@ -973,6 +973,21 @@ def inject_native_data(
         "function loadPlan(){try{PLAN=window.__SHEETS_PLAN__||{meta:null,items:[]};}catch(e){PLAN={meta:null,items:[]};}}",
     )
 
+    # El semáforo conserva el porcentaje calculado, pero utiliza la clasificación
+    # oficial del Anexo N°1 cuando existe un plan publicado en Google Sheets.
+    automatic_level = (
+        "rows.push({e:k,total:a.total,td:a.td,nTD:a.nTD,pct,"
+        "nivel:tdNivel(pct)}); });"
+    )
+    official_level = (
+        "const official=(PLAN.items||[]).find(it=>matchEstab(it.estab)===k);"
+        "const officialNivel=official?normNivel(official.nivel):'';"
+        "const nivel=['Rojo','Amarillo','Verde'].includes(officialNivel)"
+        "?officialNivel:tdNivel(pct);"
+        "rows.push({e:k,total:a.total,td:a.td,nTD:a.nTD,pct,nivel}); });"
+    )
+    html = html.replace(automatic_level, official_level, 1)
+
     # Respaldo: inicializa PLAN desde Google Sheets incluso si cambia el formato del loader.
     html = re.sub(
         r"let\s+PLAN\s*=\s*\{meta:null,items:\[\]\};",
@@ -984,7 +999,7 @@ def inject_native_data(
     html = replace_admin_button(html)
     html = html.replace(
         "Ordenado por % TD. Seleccione una fila para ver el detalle.",
-        "Ordenado por % TD (nivel calculado). El nivel oficial del Anexo N°1 se muestra en el Plan de trabajo.",
+        "Ordenado por % TD. Se utiliza el nivel oficial del Anexo N°1 cuando está publicado; de lo contrario, se calcula según los umbrales.",
         1,
     )
     return html
