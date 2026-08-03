@@ -824,37 +824,59 @@ def plan_for_html(
 
 
 def attach_minsal_results(payload, official_rows, establishments):
-    """Agrega a cada establecimiento la cifra MINSAL del mismo reporte."""
+    """Agrega las cifras MINSAL, incluso si el Anexo no trae una fila verde."""
     meta = payload.get("meta") or {}
     report_key = normalize(meta.get("reporte"))
     period_key = normalize(meta.get("periodo"))
-    names = {row.get("id"): row.get("nombre", "") for row in establishments}
-    official_by_name = {}
+    names: dict[Any, str] = {}
+    for establishment_row in establishments:
+        establishment_id = establishment_row.get("id")
+        establishment_name = establishment_row.get("nombre", "")
+        names[establishment_id] = establishment_name
+        names[str(establishment_id)] = establishment_name
+
+    official_by_name: dict[str, dict[str, Any]] = {}
     for row in official_rows:
         if (normalize(row.get("reporte")) != report_key
                 or normalize(row.get("periodo")) != period_key):
             continue
+        establishment_id = row.get("establecimiento_id")
         establishment = dashboard_name(
             row.get("establecimiento")
-            or names.get(row.get("establecimiento_id")) or ""
+            or names.get(establishment_id)
+            or names.get(str(establishment_id))
+            or DEIS_DASHBOARD_NAMES.get(str(row.get("codigo_deis") or ""))
+            or ""
         )
         if establishment:
             official_by_name[establishment] = row
-    for item in payload.get("items") or []:
-        official = official_by_name.get(dashboard_name(item.get("estab")))
-        if not official:
-            continue
-        try:
-            item["pct"] = _official_percentage(
-                official.get("porcentaje_td")
-            )
-        except (TypeError, ValueError):
-            continue
+
+    items = payload.setdefault("items", [])
+    items_by_name = {
+        dashboard_name(item.get("estab")): item
+        for item in items if item.get("estab")
+    }
+    for establishment, official in official_by_name.items():
+        item = items_by_name.get(establishment)
+        if item is None:
+            item = {
+                "estab": establishment,
+                "nivel": level_name(official.get("nivel")),
+                "periodo": str(meta.get("periodo") or ""),
+                "causas": "",
+                "medidas": "",
+                "compromisos": "",
+                "responsable": "",
+                "fecha": "",
+                "soloResultadoMinsal": True,
+            }
+            items.append(item)
+            items_by_name[establishment] = item
+        item["pct"] = _official_percentage(official.get("porcentaje_td"))
         item["minsalNumerador"] = official.get("numerador")
         item["minsalDenominador"] = official.get("denominador")
         item["minsalNivel"] = level_name(official.get("nivel"))
     return payload
-
 
 # -----------------------------------------------------------------------------
 # ADMINISTRACIÓN
@@ -1681,10 +1703,58 @@ def inject_native_data(
         }});
       }}
 
+      function ssmoccInstallReconTabs() {{
+        const tbody = document.getElementById('td-recon');
+        if (!tbody) return;
+        const card = tbody.closest('.bg-white');
+        if (!card || card.querySelector('#td-recon-tabs')) return;
+        const intro = card.querySelector('p');
+        const tabs = document.createElement('div');
+        tabs.id = 'td-recon-tabs';
+        tabs.className = 'ssmocc-recon-tabs';
+        const periods = ['Enero–Marzo', 'Abril–Junio',
+                         'Julio–Septiembre', 'Octubre–Diciembre'];
+        const published = ssmoccPublishedReportNumbers();
+        tabs.innerHTML = periods.map((period, index) => {{
+          const number = index + 1;
+          const available = published.has(number);
+          return '<button type="button" data-recon-report="' + number +
+            '" class="ssmocc-recon-tab">' +
+            '<span class="ssmocc-recon-number">' + number + '° Reporte</span>' +
+            '<span class="ssmocc-recon-period">' + period + '</span>' +
+            '<span class="ssmocc-recon-status ' +
+            (available ? 'available' : 'pending') + '">' +
+            (available ? 'Resultados disponibles' : 'Pendiente') +
+            '</span></button>';
+        }}).join('');
+        if (intro) intro.insertAdjacentElement('afterend', tabs);
+        tabs.querySelectorAll('[data-recon-report]').forEach(button => {{
+          button.addEventListener('click', function() {{
+            const reportNumber = Number(button.dataset.reconReport);
+            const cards = document.querySelectorAll('#td-calendar > div');
+            if (cards[reportNumber - 1]) cards[reportNumber - 1].click();
+            ssmoccRefreshReconTabs(reportNumber);
+          }});
+        }});
+        ssmoccRefreshReconTabs(window.__SHEETS_ACTIVE_REPORT__ || 1);
+      }}
+
+      function ssmoccRefreshReconTabs(activeReport) {{
+        document.querySelectorAll('[data-recon-report]').forEach(button => {{
+          button.classList.toggle(
+            'active', Number(button.dataset.reconReport) === Number(activeReport)
+          );
+        }});
+      }}
+
       document.addEventListener('DOMContentLoaded', function() {{
-        const observer = new MutationObserver(ssmoccRefreshReportStatus);
+        const observer = new MutationObserver(function() {{
+          ssmoccRefreshReportStatus();
+          ssmoccInstallReconTabs();
+        }});
         observer.observe(document.body, {{childList:true, subtree:true}});
         ssmoccRefreshReportStatus();
+        ssmoccInstallReconTabs();
       }});
 
       document.addEventListener('click', function(event) {{
@@ -1704,6 +1774,20 @@ def inject_native_data(
             1: 'Enero–Marzo', 2: 'Abril–Junio',
             3: 'Julio–Septiembre', 4: 'Octubre–Diciembre'
           }};
+          window.__SHEETS_PLAN__ = {{
+            meta: {{
+              reporte: 'Reporte ' + reportNumber,
+              periodo: periods[reportNumber] + ' 2026'
+            }},
+            items: []
+          }};
+          if (typeof PLAN !== 'undefined') PLAN = window.__SHEETS_PLAN__;
+          if (typeof tdState !== 'undefined') {{
+            tdState.period = 'q' + reportNumber;
+            tdState.planSel = null;
+          }}
+          if (typeof renderTD === 'function') renderTD();
+          ssmoccRefreshReconTabs(reportNumber);
           const selector = document.getElementById('td-plan-sel');
           if (selector) {{
             selector.innerHTML =
@@ -1737,6 +1821,7 @@ def inject_native_data(
         if (selector) selector.disabled = false;
         window.__SHEETS_PLAN__ = selected;
         window.__SHEETS_ACTIVE_REPORT__ = reportNumber;
+        ssmoccRefreshReconTabs(reportNumber);
         if (typeof PLAN !== 'undefined') PLAN = selected;
         if (typeof tdState !== 'undefined') {{
           tdState.planSel = null;
@@ -1865,6 +1950,60 @@ def apply_layout_patch(html: str) -> str:
       }
       #td-calendar > div.ssmocc-report-selected::after {
         content: "Reporte seleccionado";
+      }
+      .ssmocc-recon-tabs {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 16px 0 8px;
+      }
+      .ssmocc-recon-tab {
+        text-align: left;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 11px 12px;
+        background: #f8fafc;
+        transition: border-color .15s, box-shadow .15s, background .15s;
+      }
+      .ssmocc-recon-tab:hover {
+        border-color: #7fb3e0;
+        background: #f0f8ff;
+      }
+      .ssmocc-recon-tab.active {
+        border-color: #0063af;
+        background: #eef7ff;
+        box-shadow: 0 0 0 2px rgba(0,99,175,.14);
+      }
+      .ssmocc-recon-number {
+        display: block;
+        color: #00305e;
+        font-size: 13px;
+        font-weight: 800;
+      }
+      .ssmocc-recon-period {
+        display: block;
+        color: #64748b;
+        font-size: 11px;
+        margin-top: 2px;
+      }
+      .ssmocc-recon-status {
+        display: inline-block;
+        margin-top: 7px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      .ssmocc-recon-status.available {
+        color: #2e7d32;
+        background: rgba(46,125,50,.10);
+      }
+      .ssmocc-recon-status.pending {
+        color: #64748b;
+        background: #e2e8f0;
+      }
+      @media (max-width: 700px) {
+        .ssmocc-recon-tabs { grid-template-columns: repeat(2, 1fr); }
       }
       @media (min-width: 1024px) {
         #sidebar {
