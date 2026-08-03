@@ -2270,8 +2270,8 @@ def replace_admin_button(html: str) -> str:
         return (
             '<div style="display:flex;gap:8px;align-items:center">'
             f'<a id="portal-establishment-btn"{portal_attrs} '
-            f'href="https://td-ssmocc.streamlit.app/?portal=1" target="_top" '
-            "onclick=\"window.open(this.href, '_top'); return false;\">"
+            f'href="https://td-ssmocc.streamlit.app/?portal=1" '
+            f'target="_blank" rel="noopener noreferrer">'
             '<i class="fa-solid fa-hospital-user"></i> '
             'Portal establecimientos</a>'
             f'<a{attrs} href="https://td-ssmocc.streamlit.app/?admin=1" '
