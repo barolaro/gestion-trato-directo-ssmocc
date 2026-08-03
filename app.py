@@ -3494,9 +3494,14 @@ def apply_layout_patch(html: str) -> str:
         enhancement = trend_script.read_text(encoding="utf-8").replace(
             "</script>", "<\\/script>"
         )
-        html = html.replace(
-            "</body>", f"<script>{enhancement}</script>\n</body>", 1
-        )
+        document, closing_body, trailing = html.rpartition("</body>")
+        if closing_body:
+            html = (
+                document
+                + f"<script>{enhancement}</script>\n"
+                + closing_body
+                + trailing
+            )
     return html
 
 
