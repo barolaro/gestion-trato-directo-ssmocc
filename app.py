@@ -812,7 +812,9 @@ def attach_minsal_results(payload, official_rows, establishments):
         if not official:
             continue
         try:
-            item["pct"] = float(official.get("porcentaje_td"))
+            item["pct"] = _official_percentage(
+                official.get("porcentaje_td")
+            )
         except (TypeError, ValueError):
             continue
         item["minsalNumerador"] = official.get("numerador")
@@ -1208,6 +1210,31 @@ def _official_number(value: Any) -> float:
             return 0.0
 
 
+def _official_percentage(value: Any) -> float:
+    """Normaliza 61.72, 61,72 o el valor mal interpretado 6172 a 61.72."""
+    text = str(value or "").strip().replace("%", "").replace(",", ".")
+    try:
+        result = float(text)
+    except ValueError:
+        return 0.0
+    while abs(result) > 100 and abs(result) <= 1000000:
+        result /= 100
+    return round(result, 4)
+
+
+DEIS_DASHBOARD_NAMES = {
+    "110100": "San Juan de Dios",
+    "110120": "Félix Bulnes",
+    "110130": "Talagante",
+    "110150": "Melipilla",
+    "110110": "Inst. Traumatológico",
+    "110010": "SSMOCC (Dirección)",
+    "110300": "CRS S. Allende",
+    "110140": "Peñaflor",
+    "110160": "Curacaví",
+}
+
+
 @st.cache_data(show_spinner=False)
 def parse_minsal_results(file_name, file_bytes, establishments):
     reader = csv.DictReader(
@@ -1232,17 +1259,31 @@ def parse_minsal_results(file_name, file_bytes, establishments):
                 record.get(service_header)):
             continue
         raw_name = str(record.get(headers["establecimiento"]) or "").strip()
-        establishment_id = establishment_ids.get(dashboard_name(raw_name))
+        code_deis = str(
+            record.get(headers.get("codigo deis", "")) or ""
+        ).strip().replace(".0", "")
+        canonical_name = DEIS_DASHBOARD_NAMES.get(
+            code_deis, dashboard_name(raw_name)
+        )
+        establishment_id = establishment_ids.get(canonical_name)
         if establishment_id is None:
             unmatched.append(raw_name)
             continue
         output.append({
             "establecimiento_id": establishment_id,
-            "codigo_deis": str(record.get(headers.get("codigo deis", "")) or "").strip(),
-            "denominador": _official_number(record.get(headers["denominador"])),
-            "numerador": _official_number(record.get(headers["numerador"])),
-            "porcentaje_td": _official_number(
-                record.get(headers["trato directo 2026"])),
+            "codigo_deis": code_deis,
+            "denominador": int(round(
+                _official_number(record.get(headers["denominador"]))
+            )),
+            "numerador": int(round(
+                _official_number(record.get(headers["numerador"]))
+            )),
+            # Se guarda con coma como texto RAW para impedir que una planilla
+            # con configuración regional chilena convierta 61.72 en 6172.
+            "porcentaje_td": (
+                f"{_official_percentage(record.get(headers['trato directo 2026'])):.2f}"
+                .replace(".", ",")
+            ),
             "nivel": level_name(record.get(headers["nivel de riesgo"])),
             "nombre_archivo": file_name,
             "fecha_carga": datetime.now().isoformat(timespec="seconds"),
