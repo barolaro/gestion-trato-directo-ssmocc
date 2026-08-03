@@ -1079,33 +1079,44 @@ def render_user_admin(data, db):
         ):
             st.error("La contraseña debe tener al menos 8 caracteres.")
             return
-        if selected:
-            for row in users:
-                if same_id(row.get("id"), selected.get("id")):
-                    row.update({
-                        "nombre": person.strip(),
-                        "establecimiento_id": establishments[establishment],
-                        "activo": active,
-                    })
-                    if password:
-                        row["clave_hash"] = password_hash(password)
-        else:
-            next_id = max([int(row.get("id") or 0) for row in users] + [0]) + 1
-            users.append({
-                "id": next_id, "usuario": clean_user,
-                "clave_hash": password_hash(password),
-                "establecimiento_id": establishments[establishment],
-                "nombre": person.strip(), "activo": active,
-                "creado": datetime.now().isoformat(timespec="seconds"),
-                "ultima_conexion": "",
-            })
         try:
-            db.replace_records("usuarios_establecimientos", users)
-            st.success("Cuenta guardada de forma segura.")
+            user_table = db.table("usuarios_establecimientos")
+            if selected:
+                payload = {
+                    "nombre": person.strip(),
+                    "establecimiento_id": establishments[establishment],
+                    "activo": active,
+                }
+                if password:
+                    payload["clave_hash"] = password_hash(password)
+                user_table.update(payload).eq(
+                    "id", selected.get("id")
+                ).execute()
+            else:
+                next_id = max(
+                    [int(row.get("id") or 0) for row in users] + [0]
+                ) + 1
+                user_table.insert({
+                    "id": next_id,
+                    "usuario": clean_user,
+                    "clave_hash": password_hash(password),
+                    "establecimiento_id": establishments[establishment],
+                    "nombre": person.strip(),
+                    "activo": active,
+                    "creado": datetime.now().isoformat(timespec="seconds"),
+                    "ultima_conexion": "",
+                }).execute()
+            st.success(
+                f"Cuenta {clean_user} guardada. Ya puede ingresar desde "
+                "Portal establecimientos."
+            )
             st.cache_data.clear()
             st.rerun()
         except Exception as exc:
-            st.error(f"No fue posible guardar la cuenta: {exc}")
+            st.error(
+                "No fue posible guardar la cuenta en Google Sheets. "
+                f"Detalle: {exc}"
+            )
 
 
 def _contract_date(value: Any) -> str:
