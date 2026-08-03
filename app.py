@@ -2058,12 +2058,16 @@ def render_admin(data: dict[str, list[dict[str, Any]]]) -> None:
         st.query_params.clear()
         st.rerun()
 
-    contracts_tab, monthly_tab, minsal_tab, plan_tab = st.tabs(
-        ["📄 Gestión contractual", "📦 Actualización mensual",
-         "⚖️ Resultados MINSAL", "☁️ Plan oficial"]
+    contracts_tab, bulk_tab, users_tab, monthly_tab, minsal_tab, plan_tab = st.tabs(
+        ["📄 Gestión contractual", "📥 Carga masiva", "👥 Usuarios",
+         "📦 Actualización mensual", "⚖️ Resultados MINSAL", "☁️ Plan oficial"]
     )
     with contracts_tab:
         render_contract_admin(data, db)
+    with bulk_tab:
+        render_contract_bulk_admin(data, db)
+    with users_tab:
+        render_user_admin(data, db)
     with monthly_tab:
         render_monthly_admin(data, db)
     with minsal_tab:
@@ -2118,9 +2122,17 @@ def replace_admin_button(html: str) -> str:
             match.group("attrs"),
             flags=re.IGNORECASE | re.DOTALL,
         )
+        portal_attrs = re.sub(
+            r"\s+id\s*=\s*(['\"]).*?\1", "", attrs,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         return (
+            '<div style="display:flex;gap:8px;align-items:center">'
+            f'<a{portal_attrs} href="https://td-ssmocc.streamlit.app/?portal=1" '
+            'target="_top"><i class="fa-solid fa-hospital-user"></i> '
+            'Portal establecimientos</a>'
             f'<a{attrs} href="https://td-ssmocc.streamlit.app/?admin=1" '
-            f'target="_top">{match.group("body")}</a>'
+            f'target="_top">{match.group("body")}</a></div>'
         )
 
     return pattern.sub(replacement, html, count=1)
@@ -2507,9 +2519,17 @@ def apply_layout_patch(html: str) -> str:
 def main() -> None:
     data = load_data()
     admin_requested = str(st.query_params.get("admin", "0")) == "1"
+    portal_requested = str(st.query_params.get("portal", "0")) == "1"
 
     if admin_requested or st.session_state.get("admin_authenticated"):
         render_admin(data)
+        st.stop()
+    if portal_requested or st.session_state.get("portal_user_id"):
+        db = service_client()
+        if db is None:
+            st.error("No existe conexión con Google Sheets.")
+        else:
+            render_establishment_portal(data, db)
         st.stop()
 
     try:
