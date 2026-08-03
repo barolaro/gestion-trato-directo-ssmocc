@@ -89,6 +89,11 @@ SHEET_SCHEMAS: dict[str, list[str]] = {
         "id", "nombre_archivo", "fecha_carga", "registros",
         "periodo_min", "periodo_max", "establecimientos",
     ],
+    "resultados_minsal": [
+        "id", "establecimiento_id", "reporte", "periodo", "codigo_deis",
+        "denominador", "numerador", "porcentaje_td", "nivel",
+        "nombre_archivo", "fecha_carga",
+    ],
 }
 
 DEFAULT_ESTABLISHMENTS = [
@@ -384,6 +389,7 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
             "planes": [],
             "plan_trabajo": [],
             "cargas_mensuales": [],
+            "resultados_minsal": [],
             "dataset_gzip_b64": "",
         }
 
@@ -396,6 +402,7 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
         "planes": safe_read("planes"),
         "plan_trabajo": safe_read("plan_trabajo"),
         "cargas_mensuales": safe_read("cargas_mensuales"),
+        "resultados_minsal": safe_read("resultados_minsal"),
         "dataset_gzip_b64": load_dashboard_dataset_b64(),
     }
 
@@ -744,6 +751,37 @@ def plan_for_html(
     }
 
 
+def attach_minsal_results(payload, official_rows, establishments):
+    """Agrega a cada establecimiento la cifra MINSAL del mismo reporte."""
+    meta = payload.get("meta") or {}
+    report_key = normalize(meta.get("reporte"))
+    period_key = normalize(meta.get("periodo"))
+    names = {row.get("id"): row.get("nombre", "") for row in establishments}
+    official_by_name = {}
+    for row in official_rows:
+        if (normalize(row.get("reporte")) != report_key
+                or normalize(row.get("periodo")) != period_key):
+            continue
+        establishment = dashboard_name(
+            row.get("establecimiento")
+            or names.get(row.get("establecimiento_id")) or ""
+        )
+        if establishment:
+            official_by_name[establishment] = row
+    for item in payload.get("items") or []:
+        official = official_by_name.get(dashboard_name(item.get("estab")))
+        if not official:
+            continue
+        try:
+            item["pct"] = float(official.get("porcentaje_td"))
+        except (TypeError, ValueError):
+            continue
+        item["minsalNumerador"] = official.get("numerador")
+        item["minsalDenominador"] = official.get("denominador")
+        item["minsalNivel"] = level_name(official.get("nivel"))
+    return payload
+
+
 # -----------------------------------------------------------------------------
 # ADMINISTRACIÓN
 # -----------------------------------------------------------------------------
@@ -751,6 +789,7 @@ def plan_history_for_html(
     planes: list[dict[str, Any]],
     plan_rows: list[dict[str, Any]],
     establishments: list[dict[str, Any]],
+    official_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Construye un plan independiente para cada reporte y período publicado."""
     if not planes:
@@ -787,6 +826,7 @@ def plan_history_for_html(
                 if not row.get("reporte") and not row.get("periodo")
             )
         payload = plan_for_html([metadata], details, establishments)
+        payload = attach_minsal_results(payload, official_rows, establishments)
         if payload.get("items"):
             history.append(payload)
 
@@ -1107,6 +1147,139 @@ def render_monthly_admin(
             st.error(f"No fue posible publicar la base: {exc}")
 
 
+
+REPORT_PERIODS = {
+    "Reporte 1": "Enero–Marzo 2026",
+    "Reporte 2": "Abril–Junio 2026",
+    "Reporte 3": "Julio–Septiembre 2026",
+    "Reporte 4": "Octubre–Diciembre 2026",
+}
+
+
+def _official_number(value: Any) -> float:
+    text = str(value or "").strip().replace("%", "")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        try:
+            return float(text.replace(".", "").replace(",", "."))
+        except ValueError:
+            return 0.0
+
+
+@st.cache_data(show_spinner=False)
+def parse_minsal_results(file_name, file_bytes, establishments):
+    reader = csv.DictReader(
+        io.StringIO(_decode_csv(file_bytes)), delimiter=";", quotechar='"'
+    )
+    if not reader.fieldnames:
+        raise ValueError("El CSV no contiene encabezados.")
+    headers = {normalize(header): header for header in reader.fieldnames}
+    required = ["establecimiento", "denominador", "numerador",
+                "trato directo 2026", "nivel de riesgo"]
+    missing = [header for header in required if header not in headers]
+    if missing:
+        raise ValueError("Faltan columnas oficiales: " + ", ".join(missing))
+    establishment_ids = {
+        dashboard_name(row.get("nombre")): row.get("id")
+        for row in establishments if row.get("id") is not None
+    }
+    output, unmatched = [], []
+    for record in reader:
+        service_header = headers.get("servicio de salud")
+        if service_header and "metropolitano occidente" not in normalize(
+                record.get(service_header)):
+            continue
+        raw_name = str(record.get(headers["establecimiento"]) or "").strip()
+        establishment_id = establishment_ids.get(dashboard_name(raw_name))
+        if establishment_id is None:
+            unmatched.append(raw_name)
+            continue
+        output.append({
+            "establecimiento_id": establishment_id,
+            "codigo_deis": str(record.get(headers.get("codigo deis", "")) or "").strip(),
+            "denominador": _official_number(record.get(headers["denominador"])),
+            "numerador": _official_number(record.get(headers["numerador"])),
+            "porcentaje_td": _official_number(
+                record.get(headers["trato directo 2026"])),
+            "nivel": level_name(record.get(headers["nivel de riesgo"])),
+            "nombre_archivo": file_name,
+            "fecha_carga": datetime.now().isoformat(timespec="seconds"),
+        })
+    if not output:
+        raise ValueError("No se encontraron establecimientos del SSMOCC.")
+    return output, sorted(set(filter(None, unmatched)))
+
+
+def render_minsal_admin(data, db):
+    st.subheader("⚖️ Resultados oficiales MINSAL")
+    st.info(
+        "Carga el CSV descargado desde el dashboard MINSAL y asígnalo al "
+        "reporte trimestral. La comparación utilizará el mismo período."
+    )
+    report = st.selectbox("Reporte oficial", list(REPORT_PERIODS),
+                          key="minsal_report")
+    period = REPORT_PERIODS[report]
+    st.text_input("Período asociado", value=period, disabled=True)
+    existing = [
+        row for row in data.get("resultados_minsal", [])
+        if normalize(row.get("reporte")) == normalize(report)
+        and normalize(row.get("periodo")) == normalize(period)
+    ]
+    if existing:
+        st.success(
+            f"{report} ya tiene {len(existing)} cifras oficiales. "
+            "Una nueva publicación reemplazará solo este reporte."
+        )
+    uploaded = st.file_uploader(
+        "Seleccionar CSV oficial MINSAL", type=["csv"],
+        key="minsal_results_csv"
+    )
+    rows, unmatched = [], []
+    if uploaded is not None:
+        try:
+            rows, unmatched = parse_minsal_results(
+                uploaded.name, uploaded.getvalue(), data["establecimientos"])
+            names = {row.get("id"): dashboard_name(row.get("nombre"))
+                     for row in data["establecimientos"]}
+            st.success(f"Archivo validado: {len(rows)} establecimientos.")
+            st.dataframe([{
+                "Establecimiento": names.get(row["establecimiento_id"], ""),
+                "% TD MINSAL": row["porcentaje_td"],
+                "Nivel": row["nivel"],
+                "Numerador": row["numerador"],
+                "Denominador": row["denominador"],
+            } for row in rows], use_container_width=True, hide_index=True)
+            if unmatched:
+                st.warning("No se reconocieron: " + ", ".join(unmatched))
+        except Exception as exc:
+            st.error(f"No fue posible procesar el archivo MINSAL: {exc}")
+    publish = st.button(
+        "⚖️ Publicar resultados MINSAL en Google Sheets",
+        type="primary", use_container_width=True,
+        disabled=uploaded is None or not rows
+    )
+    if publish:
+        try:
+            current_rows = db.table("resultados_minsal").select("*").execute().data or []
+            for current in current_rows:
+                if (current.get("id") is not None
+                        and normalize(current.get("reporte")) == normalize(report)
+                        and normalize(current.get("periodo")) == normalize(period)):
+                    db.table("resultados_minsal").delete().eq(
+                        "id", current["id"]).execute()
+            for row in rows:
+                row["reporte"], row["periodo"] = report, period
+            db.table("resultados_minsal").insert(rows).execute()
+            st.success(f"{report} publicado con {len(rows)} cifras MINSAL.")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible publicar los resultados MINSAL: {exc}")
+
+
 def render_plan_admin(
     data: dict[str, list[dict[str, Any]]], db: SheetClient
 ) -> None:
@@ -1248,13 +1421,16 @@ def render_admin(data: dict[str, list[dict[str, Any]]]) -> None:
         st.query_params.clear()
         st.rerun()
 
-    contracts_tab, monthly_tab, plan_tab = st.tabs(
-        ["📄 Gestión contractual", "📦 Actualización mensual", "☁️ Plan oficial"]
+    contracts_tab, monthly_tab, minsal_tab, plan_tab = st.tabs(
+        ["📄 Gestión contractual", "📦 Actualización mensual",
+         "⚖️ Resultados MINSAL", "☁️ Plan oficial"]
     )
     with contracts_tab:
         render_contract_admin(data, db)
     with monthly_tab:
         render_monthly_admin(data, db)
+    with minsal_tab:
+        render_minsal_admin(data, db)
     with plan_tab:
         render_plan_admin(data, db)
 
@@ -1430,7 +1606,10 @@ def inject_native_data(
         window.__SHEETS_PLAN__ = selected;
         window.__SHEETS_ACTIVE_REPORT__ = reportNumber;
         if (typeof PLAN !== 'undefined') PLAN = selected;
-        if (typeof tdState !== 'undefined') tdState.planSel = null;
+        if (typeof tdState !== 'undefined') {
+          tdState.planSel = null;
+          tdState.period = 'q' + reportNumber;
+        }
         if (typeof renderTD === 'function') renderTD();
         setTimeout(function() {{
           const currentCards = document.querySelectorAll('#td-calendar > div');
@@ -1588,11 +1767,15 @@ def main() -> None:
     html = inject_native_data(
         html,
         contracts_for_html(data["contratos"], data["establecimientos"]),
-        plan_for_html(
-            data["planes"], data["plan_trabajo"], data["establecimientos"]
+        attach_minsal_results(
+            plan_for_html(
+                data["planes"], data["plan_trabajo"], data["establecimientos"]
+            ),
+            data["resultados_minsal"], data["establecimientos"],
         ),
         plan_history_for_html(
-            data["planes"], data["plan_trabajo"], data["establecimientos"]
+            data["planes"], data["plan_trabajo"], data["establecimientos"],
+            data["resultados_minsal"],
         ),
         str(data.get("dataset_gzip_b64") or ""),
         (
