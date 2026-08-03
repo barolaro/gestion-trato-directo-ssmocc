@@ -1242,6 +1242,88 @@ def render_contract_bulk_admin(data, db):
             st.error(f"No fue posible guardar la carga: {exc}")
 
 
+
+@st.cache_data(show_spinner=False)
+def decode_dashboard_dataset(dataset_gzip_b64: str) -> list[dict[str, Any]]:
+    """Decodifica una vez la última base mensual guardada en Google Sheets."""
+    if not dataset_gzip_b64:
+        return []
+    try:
+        compressed = base64.b64decode(dataset_gzip_b64)
+        raw = gzip.decompress(compressed)
+        records = json.loads(raw.decode("utf-8"))
+        return records if isinstance(records, list) else []
+    except (ValueError, OSError, json.JSONDecodeError):
+        return []
+
+
+def portal_contracts_for_establishment(
+    data: dict[str, Any],
+    establishment_id: Any,
+    establishment_name: str,
+) -> list[dict[str, Any]]:
+    """Homologa instrumentos mensuales con antecedentes contractuales guardados."""
+    saved = [
+        dict(row) for row in data.get("contratos", [])
+        if same_id(row.get("establecimiento_id"), establishment_id)
+    ]
+    by_tender = {
+        normalize(row.get("licitacion")): row
+        for row in saved if row.get("licitacion")
+    }
+    monthly_rows = decode_dashboard_dataset(
+        str(data.get("dataset_gzip_b64") or "")
+    )
+    target_name = dashboard_name(establishment_name)
+    aggregates: dict[str, dict[str, Any]] = {}
+    for row in monthly_rows:
+        if dashboard_name(row.get("e")) != target_name:
+            continue
+        tender = str(row.get("li") or "").strip()
+        if not tender:
+            continue
+        key = normalize(tender)
+        item = aggregates.setdefault(key, {
+            "licitacion": tender,
+            "monto_ejecutado": 0.0,
+            "ordenes_compra": set(),
+        })
+        try:
+            item["monto_ejecutado"] += float(row.get("t") or 0)
+        except (TypeError, ValueError):
+            pass
+        purchase_order = str(row.get("oc") or "").strip()
+        if purchase_order:
+            item["ordenes_compra"].add(purchase_order)
+
+    for key, source in aggregates.items():
+        if key in by_tender:
+            by_tender[key]["monto_ejecutado"] = round(
+                source["monto_ejecutado"]
+            )
+            by_tender[key]["cantidad_oc"] = len(source["ordenes_compra"])
+            continue
+        by_tender[key] = {
+            "id": None,
+            "establecimiento_id": establishment_id,
+            "licitacion": source["licitacion"],
+            "monto_adjudicado": 0,
+            "fecha_adjudicacion": "",
+            "duracion_meses": "",
+            "anticipacion_renovacion": 6,
+            "estado": "Vigente",
+            "responsable": "",
+            "observaciones": "",
+            "estado_revision": "Incompleto",
+            "monto_ejecutado": round(source["monto_ejecutado"]),
+            "cantidad_oc": len(source["ordenes_compra"]),
+            "_origen_mensual": True,
+        }
+    return sorted(
+        by_tender.values(),
+        key=lambda row: normalize(row.get("licitacion")),
+    )
+
 def portal_login(data):
     user_id = st.session_state.get("portal_user_id")
     if user_id is not None:
@@ -1309,10 +1391,9 @@ def render_establishment_portal(data, db):
         "exclusivamente los registros asociados a su establecimiento."
     )
 
-    contracts = [
-        dict(row) for row in data["contratos"]
-        if same_id(row.get("establecimiento_id"), establishment_id)
-    ]
+    contracts = portal_contracts_for_establishment(
+        data, establishment_id, name
+    )
     incomplete = sum(
         1 for row in contracts
         if not row.get("monto_adjudicado")
@@ -1357,6 +1438,8 @@ def render_establishment_portal(data, db):
         )
         summary_rows.append({
             "Instrumento": row.get("licitacion") or "Sin código",
+            "OC": int(row.get("cantidad_oc") or 0),
+            "Monto ejecutado": float(row.get("monto_ejecutado") or 0),
             "Antecedentes": "Completos" if complete else "Pendientes",
             "Revisión SSMOCC": row.get("estado_revision") or "Incompleto",
             "Última actualización": row.get("ultima_actualizacion") or "—",
@@ -1365,6 +1448,10 @@ def render_establishment_portal(data, db):
         summary_rows, use_container_width=True, hide_index=True,
         column_config={
             "Instrumento": st.column_config.TextColumn(width="medium"),
+            "OC": st.column_config.NumberColumn(width="small"),
+            "Monto ejecutado": st.column_config.NumberColumn(
+                format="$ %d", width="medium"
+            ),
             "Antecedentes": st.column_config.TextColumn(width="small"),
             "Revisión SSMOCC": st.column_config.TextColumn(width="small"),
         },
@@ -1519,9 +1606,16 @@ def render_establishment_portal(data, db):
             "fecha": now,
         }
         try:
-            db.table("contratos").update(payload).eq(
-                "id", selected.get("id")
-            ).execute()
+            if selected.get("id") is not None:
+                db.table("contratos").update(payload).eq(
+                    "id", selected.get("id")
+                ).execute()
+            else:
+                db.table("contratos").insert({
+                    "establecimiento_id": establishment_id,
+                    "licitacion": selected.get("licitacion"),
+                    **payload,
+                }).execute()
             db.table("historial_cambios").insert(history_payload).execute()
             st.success(
                 "Antecedentes enviados correctamente al SSMOCC."
