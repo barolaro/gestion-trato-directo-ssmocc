@@ -2363,6 +2363,13 @@ def render_contract_admin(
         str(selected.get("establecimiento_id")), default_establishment
     )
 
+    def option_index(options: list[str], value: Any) -> int:
+        text_value = str(value or "").strip().lower()
+        for index, option in enumerate(options):
+            if option.lower() == text_value:
+                return index
+        return 0
+
     with st.form("contract_form"):
         establishment = st.selectbox(
             "Establecimiento",
@@ -2402,7 +2409,7 @@ def render_contract_admin(
         administrative_state = st.selectbox(
             "Estado administrativo",
             ["Vigente", "En renovación", "Finalizado", "Suspendido"],
-            index=state_index(
+            index=option_index(
                 ["Vigente", "En renovación", "Finalizado", "Suspendido"],
                 selected.get("estado_administrativo"),
             ),
@@ -2410,7 +2417,7 @@ def render_contract_admin(
         review_state = st.selectbox(
             "Estado del antecedente",
             ["Borrador", "En revisión", "Validado", "Observado"],
-            index=state_index(
+            index=option_index(
                 ["Borrador", "En revisión", "Validado", "Observado"],
                 selected.get("estado_revision"),
             ),
