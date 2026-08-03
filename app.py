@@ -2266,10 +2266,16 @@ def admin_login() -> bool:
 def render_contract_admin(
     data: dict[str, list[dict[str, Any]]], db: SheetClient
 ) -> None:
+    st.subheader("📄 Administración contractual centralizada")
+    st.info(
+        "Cree, edite o restablezca antecedentes contractuales desde un único lugar. "
+        "La eliminación está protegida y queda registrada en el historial."
+    )
+
     establishments = data["establecimientos"]
     contracts = data["contratos"]
     establishment_options = {
-        row["nombre"]: row["id"]
+        dashboard_name(str(row["nombre"])): row["id"]
         for row in establishments
         if row.get("nombre") and row.get("id") is not None
     }
@@ -2277,20 +2283,84 @@ def render_contract_admin(
         st.error("No existen establecimientos disponibles en Google Sheets.")
         return
 
-    id_to_name = {value: key for key, value in establishment_options.items()}
-    contract_options: dict[str, dict[str, Any]] = {"Crear nuevo contrato": {}}
+    id_to_name = {str(value): key for key, value in establishment_options.items()}
+    total_contracts = len(contracts)
+    complete_contracts = sum(
+        1 for row in contracts
+        if row.get("monto_adjudicado") and row.get("fecha_adjudicacion")
+        and row.get("duracion_meses")
+    )
+    validated_contracts = sum(
+        1 for row in contracts
+        if str(row.get("estado_revision") or "").strip().lower() == "validado"
+    )
+    metric_a, metric_b, metric_c = st.columns(3)
+    metric_a.metric("Antecedentes guardados", total_contracts)
+    metric_b.metric("Antecedentes completos", complete_contracts)
+    metric_c.metric("Registros validados", validated_contracts)
+
+    filter_a, filter_b = st.columns([1, 2])
+    establishment_filter = filter_a.selectbox(
+        "Filtrar por establecimiento",
+        ["Todos los establecimientos", *establishment_options.keys()],
+    )
+    search_text = filter_b.text_input(
+        "Buscar licitación o instrumento",
+        placeholder="Ej.: 1641-121-LR24",
+    ).strip().lower()
+
+    filtered_contracts = []
     for contract in contracts:
+        contract_establishment = id_to_name.get(
+            str(contract.get("establecimiento_id")), "Sin establecimiento"
+        )
+        if (
+            establishment_filter != "Todos los establecimientos"
+            and contract_establishment != establishment_filter
+        ):
+            continue
+        if search_text and search_text not in str(contract.get("licitacion") or "").lower():
+            continue
+        filtered_contracts.append(contract)
+
+    if filtered_contracts:
+        preview = [
+            {
+                "Establecimiento": id_to_name.get(
+                    str(row.get("establecimiento_id")), "Sin establecimiento"
+                ),
+                "Instrumento": row.get("licitacion") or "Sin código",
+                "Monto adjudicado": row.get("monto_adjudicado") or "",
+                "Fecha adjudicación": row.get("fecha_adjudicacion") or "",
+                "Duración (meses)": row.get("duracion_meses") or "",
+                "Estado": row.get("estado_revision") or "Borrador",
+            }
+            for row in filtered_contracts
+        ]
+        st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No hay antecedentes guardados que coincidan con los filtros.")
+
+    contract_options: dict[str, dict[str, Any]] = {"➕ Crear nuevo antecedente": {}}
+    for contract in filtered_contracts:
         label = (
             f"{contract.get('licitacion', 'Sin código')} · "
-            f"{id_to_name.get(contract.get('establecimiento_id'), 'Sin establecimiento')}"
+            f"{id_to_name.get(str(contract.get('establecimiento_id')), 'Sin establecimiento')}"
         )
+        if label in contract_options:
+            label = f"{label} · {contract.get('id', '')}"
         contract_options[label] = contract
 
-    selected_label = st.selectbox("Contrato a gestionar", list(contract_options))
+    selected_label = st.selectbox("Antecedente a gestionar", list(contract_options))
     selected = contract_options[selected_label]
     establishment_names = list(establishment_options)
+    default_establishment = (
+        establishment_filter
+        if establishment_filter in establishment_options
+        else establishment_names[0]
+    )
     selected_establishment = id_to_name.get(
-        selected.get("establecimiento_id"), establishment_names[0]
+        str(selected.get("establecimiento_id")), default_establishment
     )
 
     with st.form("contract_form"):
@@ -2312,88 +2382,153 @@ def render_contract_admin(
         )
         raw_date = selected.get("fecha_adjudicacion")
         try:
-            default_date = date.fromisoformat(str(raw_date)) if raw_date else date.today()
-        except ValueError:
-            default_date = date.today()
-        award_date = st.date_input("Fecha de adjudicación", value=default_date)
-
-        col1, col2 = st.columns(2)
-        duration = col1.number_input(
-            "Duración (meses)", 1, 240, int(selected.get("duracion_meses") or 12)
+            adjudication_date = date.fromisoformat(str(raw_date)) if raw_date else date.today()
+        except (TypeError, ValueError):
+            adjudication_date = date.today()
+        adjudication_date = st.date_input(
+            "Fecha de adjudicación", value=adjudication_date
         )
-        renewal = col2.number_input(
+        duration_col, renewal_col = st.columns(2)
+        duration = duration_col.number_input(
+            "Duración (meses)",
+            min_value=0,
+            value=int(float(selected.get("duracion_meses") or 0)),
+        )
+        renewal = renewal_col.number_input(
             "Anticipación de renovación (meses)",
-            0,
-            36,
-            int(selected.get("anticipacion_renovacion") or 6),
+            min_value=0,
+            value=int(float(selected.get("anticipacion_meses") or 6)),
         )
-        statuses = [
-            "Vigente",
-            "En renovación",
-            "Prorrogado",
-            "Finalizado",
-            "Suspendido",
-        ]
-        current_status = str(selected.get("estado") or "Vigente")
-        status = st.selectbox(
+        administrative_state = st.selectbox(
             "Estado administrativo",
-            statuses,
-            index=statuses.index(current_status) if current_status in statuses else 0,
+            ["Vigente", "En renovación", "Finalizado", "Suspendido"],
+            index=state_index(
+                ["Vigente", "En renovación", "Finalizado", "Suspendido"],
+                selected.get("estado_administrativo"),
+            ),
         )
-        review_options = [
-            "Incompleto", "Borrador", "Enviado", "Observado", "Validado"
-        ]
-        current_review = str(
-            selected.get("estado_revision") or "Incompleto"
+        review_state = st.selectbox(
+            "Estado del antecedente",
+            ["Borrador", "En revisión", "Validado", "Observado"],
+            index=state_index(
+                ["Borrador", "En revisión", "Validado", "Observado"],
+                selected.get("estado_revision"),
+            ),
         )
-        review_status = st.selectbox(
-            "Estado de revisión SSMOCC",
-            review_options,
-            index=review_options.index(current_review)
-            if current_review in review_options else 0,
-            help="Validado bloquea la edición del establecimiento."
-        )
-        manager = st.text_input(
+        responsible = st.text_input(
             "Responsable", value=str(selected.get("responsable") or "")
         )
         observations = st.text_area(
             "Observaciones", value=str(selected.get("observaciones") or "")
         )
-        save = st.form_submit_button(
-            "💾 Guardar gestión contractual", use_container_width=True
+        submitted = st.form_submit_button(
+            "💾 Guardar cambios" if selected.get("id") else "➕ Crear antecedente",
+            use_container_width=True,
+            type="primary",
         )
 
-    if save:
+    if submitted:
         if not tender.strip():
-            st.error("Debes ingresar la licitación o instrumento.")
-            return
-        payload = {
-            "establecimiento_id": establishment_options[establishment],
-            "licitacion": tender.strip(),
-            "monto_adjudicado": amount,
-            "fecha_adjudicacion": award_date.isoformat(),
-            "duracion_meses": int(duration),
-            "anticipacion_renovacion": int(renewal),
-            "estado": status,
-            "responsable": manager.strip(),
-            "observaciones": observations.strip(),
-            "estado_revision": review_status,
-            "ultima_actualizacion": datetime.now().isoformat(
-                timespec="seconds"
-            ),
-            "actualizado_por": "administrador",
-        }
-        try:
-            if selected.get("id") is not None:
-                db.table("contratos").update(payload).eq(
-                    "id", selected["id"]
+            st.error("Debe indicar la licitación o instrumento.")
+        else:
+            contract_id = selected.get("id") or (
+                f"ctr-{datetime.now().strftime('%Y%m%d%H%M%S')}-"
+                f"{pysecrets.token_hex(3)}"
+            )
+            payload = {
+                "id": contract_id,
+                "establecimiento_id": establishment_options[establishment],
+                "licitacion": tender.strip(),
+                "monto_adjudicado": amount,
+                "fecha_adjudicacion": adjudication_date.isoformat(),
+                "duracion_meses": duration,
+                "anticipacion_meses": renewal,
+                "estado_administrativo": administrative_state,
+                "responsable": responsible.strip(),
+                "observaciones": observations.strip(),
+                "actualizado": datetime.now().isoformat(timespec="seconds"),
+                "estado_revision": review_state,
+                "actualizado_por": "administrador",
+            }
+            action = "Antecedente actualizado" if selected.get("id") else "Antecedente creado"
+            try:
+                if selected.get("id"):
+                    (
+                        db.table("contratos")
+                        .update(payload)
+                        .eq("id", selected["id"])
+                        .execute()
+                    )
+                else:
+                    db.table("contratos").insert(payload).execute()
+                db.table("historial_cambios").insert(
+                    {
+                        "id": (
+                            f"hist-{datetime.now().strftime('%Y%m%d%H%M%S')}-"
+                            f"{pysecrets.token_hex(3)}"
+                        ),
+                        "contrato_id": contract_id,
+                        "establecimiento_id": establishment_options[establishment],
+                        "usuario": "administrador",
+                        "accion": action,
+                        "detalle": json.dumps(payload, ensure_ascii=False, default=str),
+                        "fecha": datetime.now().isoformat(timespec="seconds"),
+                    }
                 ).execute()
-            else:
-                db.table("contratos").insert(payload).execute()
-            st.success("Contrato guardado correctamente en Google Sheets.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"No fue posible guardar el contrato: {exc}")
+                st.success(f"{action} correctamente.")
+                clear_service_cache()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No fue posible guardar el antecedente: {exc}")
+
+    if selected.get("id"):
+        st.divider()
+        with st.expander("🛡️ Zona de control: restablecer o eliminar antecedente"):
+            instrument = str(selected.get("licitacion") or "")
+            st.warning(
+                "Esta acción elimina solo los antecedentes complementarios guardados. "
+                "El instrumento mensual de origen no se borra y volverá a aparecer como pendiente."
+            )
+            confirmation = st.text_input(
+                f"Para confirmar, escriba exactamente: {instrument}",
+                key=f"delete-confirm-{selected.get('id')}",
+            )
+            delete_clicked = st.button(
+                "🗑️ Eliminar antecedente y dejarlo pendiente",
+                use_container_width=True,
+                disabled=confirmation.strip() != instrument,
+            )
+            if delete_clicked:
+                try:
+                    db.table("historial_cambios").insert(
+                        {
+                            "id": (
+                                f"hist-{datetime.now().strftime('%Y%m%d%H%M%S')}-"
+                                f"{pysecrets.token_hex(3)}"
+                            ),
+                            "contrato_id": selected.get("id"),
+                            "establecimiento_id": selected.get("establecimiento_id"),
+                            "usuario": "administrador",
+                            "accion": "Antecedente eliminado",
+                            "detalle": json.dumps(
+                                selected, ensure_ascii=False, default=str
+                            ),
+                            "fecha": datetime.now().isoformat(timespec="seconds"),
+                        }
+                    ).execute()
+                    (
+                        db.table("contratos")
+                        .delete()
+                        .eq("id", selected["id"])
+                        .execute()
+                    )
+                    st.success(
+                        "Antecedente eliminado. El instrumento quedó nuevamente pendiente."
+                    )
+                    clear_service_cache()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No fue posible eliminar el antecedente: {exc}")
 
 
 def find_header_row(uploaded_file, sheet_name: str) -> int:
@@ -2900,16 +3035,14 @@ def render_admin(data: dict[str, list[dict[str, Any]]]) -> None:
         st.query_params.clear()
         st.rerun()
 
-    contracts_tab, bulk_tab, users_tab, monthly_tab, minsal_tab, plan_tab = st.tabs(
-        ["📄 Gestión contractual", "📥 Carga masiva", "👥 Usuarios",
+    contracts_tab, bulk_tab, monthly_tab, minsal_tab, plan_tab = st.tabs(
+        ["📄 Gestión contractual", "📥 Carga masiva",
          "📦 Actualización mensual", "⚖️ Resultados MINSAL", "☁️ Plan oficial"]
     )
     with contracts_tab:
         render_contract_admin(data, db)
     with bulk_tab:
         render_contract_bulk_admin(data, db)
-    with users_tab:
-        render_user_admin(data, db)
     with monthly_tab:
         render_monthly_admin(data, db)
     with minsal_tab:
@@ -2964,19 +3097,10 @@ def replace_admin_button(html: str) -> str:
             match.group("attrs"),
             flags=re.IGNORECASE | re.DOTALL,
         )
-        portal_attrs = re.sub(
-            r"\s+id\s*=\s*(['\"]).*?\1", "", attrs,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
         return (
-            '<div style="display:flex;gap:8px;align-items:center">'
-            f'<a id="portal-establishment-btn"{portal_attrs} '
-            f'href="https://td-ssmocc.streamlit.app/?portal=1" '
-            f'target="_blank" rel="noopener noreferrer">'
-            '<i class="fa-solid fa-hospital-user"></i> '
-            'Portal establecimientos</a>'
             f'<a{attrs} href="https://td-ssmocc.streamlit.app/?admin=1" '
-            f'target="_top">{match.group("body")}</a></div>'
+            f'target="_blank" rel="noopener noreferrer">'
+            f'{match.group("body")}</a>'
         )
 
     return pattern.sub(replacement, html, count=1)
