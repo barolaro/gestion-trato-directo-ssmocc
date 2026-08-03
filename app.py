@@ -1516,6 +1516,19 @@ def render_contract_admin(
             statuses,
             index=statuses.index(current_status) if current_status in statuses else 0,
         )
+        review_options = [
+            "Incompleto", "Borrador", "Enviado", "Observado", "Validado"
+        ]
+        current_review = str(
+            selected.get("estado_revision") or "Incompleto"
+        )
+        review_status = st.selectbox(
+            "Estado de revisión SSMOCC",
+            review_options,
+            index=review_options.index(current_review)
+            if current_review in review_options else 0,
+            help="Validado bloquea la edición del establecimiento."
+        )
         manager = st.text_input(
             "Responsable", value=str(selected.get("responsable") or "")
         )
@@ -1540,6 +1553,11 @@ def render_contract_admin(
             "estado": status,
             "responsable": manager.strip(),
             "observaciones": observations.strip(),
+            "estado_revision": review_status,
+            "ultima_actualizacion": datetime.now().isoformat(
+                timespec="seconds"
+            ),
+            "actualizado_por": "administrador",
         }
         try:
             if selected.get("id") is not None:
