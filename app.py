@@ -303,8 +303,16 @@ class SheetClient:
     def replace_records(
         self, name: str, records: list[dict[str, Any]]
     ) -> None:
-        """Reemplaza una tabla completa con una sola actualización eficiente."""
-        self.table(name)
+        """Reemplaza una tabla completa con una sola escritura masiva."""
+        if name not in self._worksheets:
+            try:
+                self._worksheets[name] = self._spreadsheet.worksheet(name)
+            except gspread.WorksheetNotFound:
+                headers = SHEET_SCHEMAS[name]
+                worksheet = self._spreadsheet.add_worksheet(
+                    title=name, rows=200, cols=len(headers)
+                )
+                self._worksheets[name] = worksheet
         worksheet = self._worksheets[name]
         headers = SHEET_SCHEMAS[name]
         values = [
@@ -441,7 +449,6 @@ def batch_read_tables() -> dict[str, list[dict[str, Any]]]:
 @st.cache_data(ttl=60, show_spinner=False)
 def load_data() -> dict[str, list[dict[str, Any]]]:
     try:
-        ensure_optional_sheet("resultados_minsal")
         tables = batch_read_tables()
     except Exception as exc:
         st.warning(
@@ -1369,17 +1376,36 @@ def render_minsal_admin(data, db):
     )
     if publish:
         try:
-            current_rows = db.table("resultados_minsal").select("*").execute().data or []
-            for current in current_rows:
-                if (current.get("id") is not None
-                        and normalize(current.get("reporte")) == normalize(report)
-                        and normalize(current.get("periodo")) == normalize(period)):
-                    db.table("resultados_minsal").delete().eq(
-                        "id", current["id"]).execute()
+            # Conserva los demás reportes y reemplaza el seleccionado mediante
+            # una única escritura. Evita leer/borrar fila por fila y agotar la
+            # cuota de Google Sheets.
+            retained = [
+                dict(current)
+                for current in data.get("resultados_minsal", [])
+                if not (
+                    normalize(current.get("reporte")) == normalize(report)
+                    and normalize(current.get("periodo")) == normalize(period)
+                )
+            ]
+            published_rows = []
+            next_id = max(
+                [int(row.get("id") or 0) for row in retained]
+                + [0]
+            ) + 1
             for row in rows:
-                row["reporte"], row["periodo"] = report, period
-            db.table("resultados_minsal").insert(rows).execute()
-            st.success(f"{report} publicado con {len(rows)} cifras MINSAL.")
+                published = dict(row)
+                published["id"] = next_id
+                published["reporte"] = report
+                published["periodo"] = period
+                published_rows.append(published)
+                next_id += 1
+            db.replace_records(
+                "resultados_minsal", retained + published_rows
+            )
+            st.success(
+                f"{report} publicado con {len(published_rows)} cifras MINSAL. "
+                "Todos los establecimientos quedaron homologados."
+            )
             st.cache_data.clear()
             st.rerun()
         except Exception as exc:
