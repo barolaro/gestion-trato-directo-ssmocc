@@ -1606,10 +1606,10 @@ def inject_native_data(
         window.__SHEETS_PLAN__ = selected;
         window.__SHEETS_ACTIVE_REPORT__ = reportNumber;
         if (typeof PLAN !== 'undefined') PLAN = selected;
-        if (typeof tdState !== 'undefined') {
+        if (typeof tdState !== 'undefined') {{
           tdState.planSel = null;
           tdState.period = 'q' + reportNumber;
-        }
+        }}
         if (typeof renderTD === 'function') renderTD();
         setTimeout(function() {{
           const currentCards = document.querySelectorAll('#td-calendar > div');
