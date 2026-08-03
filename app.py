@@ -1444,15 +1444,32 @@ def decode_dashboard_dataset(dataset_gzip_b64: str) -> list[dict[str, Any]]:
         return []
 
 
+def excluded_contract_instrument(
+    tender: Any,
+    channel: Any = "",
+) -> bool:
+    """Excluye Compra Ágil y referencias COT de la gestión contractual."""
+    normalized_channel = normalize(channel)
+    tender_text = str(tender or "").strip().upper()
+    is_cot_reference = bool(
+        re.search(r"(?:^|[-_\s])COT(?:\d|[-_\s]|$)", tender_text)
+    )
+    return normalized_channel == "compra agil" or is_cot_reference
+
+
 def portal_contracts_for_establishment(
     data: dict[str, Any],
     establishment_id: Any,
     establishment_name: str,
 ) -> list[dict[str, Any]]:
-    """Homologa instrumentos mensuales con antecedentes contractuales guardados."""
+    """Homologa solo licitaciones y convenios con antecedentes guardados."""
     saved = [
         dict(row) for row in data.get("contratos", [])
         if same_id(row.get("establecimiento_id"), establishment_id)
+        and not excluded_contract_instrument(
+            row.get("licitacion"),
+            row.get("modalidad") or row.get("canal"),
+        )
     ]
     by_tender = {
         normalize(row.get("licitacion")): row
@@ -1467,7 +1484,7 @@ def portal_contracts_for_establishment(
         if dashboard_name(row.get("e")) != target_name:
             continue
         tender = str(row.get("li") or "").strip()
-        if not tender:
+        if not tender or excluded_contract_instrument(tender, row.get("c")):
             continue
         key = normalize(tender)
         item = aggregates.setdefault(key, {
