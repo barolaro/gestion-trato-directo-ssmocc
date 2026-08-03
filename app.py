@@ -597,6 +597,7 @@ DASHBOARD_NAMES = {
     "hospital felix bulnes": "Félix Bulnes",
     "felix bulnes": "Félix Bulnes",
     "hospital de melipilla": "Melipilla",
+    "hospital san jose melipilla": "Melipilla",
     "hospital melipilla": "Melipilla",
     "melipilla": "Melipilla",
     "hospital de penaflor": "Peñaflor",
@@ -614,6 +615,7 @@ DASHBOARD_NAMES = {
     "instituto traumatologico dr teodoro gebauer": "Inst. Traumatológico",
     "inst traumatologico": "Inst. Traumatológico",
     "hospital de talagante": "Talagante",
+    "hospital adalberto steeger talagante": "Talagante",
     "hospital talagante": "Talagante",
     "talagante": "Talagante",
 }
