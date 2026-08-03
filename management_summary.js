@@ -1,7 +1,11 @@
 (function () {
   'use strict';
 
-  const ALERT_STATES = new Set(['CANCELADA', 'NO ACEPTADA']);
+  const MANAGEMENT_ALERT_STATES = new Set([
+    'CANCELADA',
+    'NO ACEPTADA',
+    'CANCELACION SOLICITADA'
+  ]);
 
   function contextLabel() {
     const selected = [...state.estabs];
@@ -22,7 +26,7 @@
         if (row.c === 'TRATO DIRECTO') tdAmount += row.t || 0;
         if (row.pr) providers.set(row.pr, (providers.get(row.pr) || 0) + (row.t || 0));
       }
-      if (ALERT_STATES.has(row.s)) alerts++;
+      if (MANAGEMENT_ALERT_STATES.has(row.s)) alerts++;
       if (row.oc) orders.add(`${row.e}|${row.oc}`);
     }
     const topProvider = [...providers.entries()].sort((a, b) => b[1] - a[1])[0];
