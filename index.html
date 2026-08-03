@@ -266,8 +266,36 @@ tailwind.config = { theme:{ extend:{
 
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
         <div class="xl:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <div class="flex items-baseline justify-between mb-1"><h3 class="font-tight font-bold text-[15px]">Tendencia mensual del gasto</h3><span class="text-[11px] text-slate-400">monto y nº de líneas por mes</span></div>
+          <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+            <div>
+              <h3 class="font-tight font-bold text-[15px]">Tendencia mensual de compras</h3>
+              <p class="text-[11px] text-slate-400">monto y número de OC únicas por mes</p>
+            </div>
+            <span id="trend-period" class="text-[11px] font-semibold text-govblue bg-blue-50 px-2.5 py-1 rounded-full">—</span>
+          </div>
           <div class="h-[280px]"><canvas id="ch-trend"></canvas></div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-3 pt-3 border-t border-slate-100">
+            <div class="rounded-lg bg-slate-50 border border-slate-100 p-3">
+              <div class="text-[10px] uppercase tracking-wide font-semibold text-slate-500">Monto del mes</div>
+              <div id="trend-amount" class="text-[16px] font-extrabold text-slate-800 tnum mt-1">—</div>
+            </div>
+            <div class="rounded-lg bg-slate-50 border border-slate-100 p-3">
+              <div class="text-[10px] uppercase tracking-wide font-semibold text-slate-500">OC únicas</div>
+              <div id="trend-orders" class="text-[16px] font-extrabold text-slate-800 tnum mt-1">—</div>
+            </div>
+            <div class="rounded-lg bg-slate-50 border border-slate-100 p-3">
+              <div class="text-[10px] uppercase tracking-wide font-semibold text-slate-500">Promedio por OC</div>
+              <div id="trend-average" class="text-[16px] font-extrabold text-slate-800 tnum mt-1">—</div>
+            </div>
+            <div id="trend-signal-card" class="rounded-lg border p-3 bg-emerald-50 border-emerald-200">
+              <div class="text-[10px] uppercase tracking-wide font-semibold text-slate-500">Señal de gestión</div>
+              <div id="trend-signal" class="text-[14px] font-extrabold mt-1 text-emerald-700">Actividad estable</div>
+            </div>
+          </div>
+          <div id="trend-message" class="mt-2 rounded-lg bg-blue-50 border border-blue-100 px-3 py-2 text-[11px] leading-relaxed text-slate-600">
+            Permite detectar variaciones en el gasto, la cantidad de órdenes y su valor promedio.
+          </div>
+          <p class="mt-1.5 text-[10px] text-slate-400"><i class="fa-solid fa-circle-info mr-1"></i>Señal preventiva de gestión: no acredita por sí sola fragmentación de compras.</p>
         </div>
         <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
           <h3 class="font-tight font-bold text-[15px] mb-1">Estado de las órdenes</h3><span class="text-[11px] text-slate-400">nº de líneas por estado</span>
@@ -954,10 +982,18 @@ function renderCharts(f){
   const cA=[...cM.entries()].sort((a,b)=>b[1]-a[1]);
   upsertDoughnut('ch-canal',cA.map(x=>titleCase(x[0])),cA.map(x=>x[1]),cA.map(x=>CANAL_COLOR[x[0]]||'#94a3b8'));
 
-  const mM=new Array(12).fill(0), mC=new Array(12).fill(0);
-  for(const r of f){ if(r._m>=0){ if(!r.m) mM[r._m]+=r.t; mC[r._m]++; } }
-  let last=0; for(let i=0;i<12;i++) if(mC[i]>0) last=i;
+  const mM=new Array(12).fill(0);
+  const mOC=Array.from({length:12},()=>new Set());
+  for(const r of f){
+    if(r._m>=0){
+      if(!r.m) mM[r._m]+=r.t;
+      if(r.oc) mOC[r._m].add(r.oc);
+    }
+  }
+  const mC=mOC.map(set=>set.size);
+  let last=0; for(let i=0;i<12;i++) if(mC[i]>0||mM[i]>0) last=i;
   upsertTrend('ch-trend',MESES.slice(0,last+1),mM.slice(0,last+1).map(v=>v/1e6),mC.slice(0,last+1));
+  renderPurchaseManagementSignal(mM,mC,last);
 
   const stM=new Map(); for(const r of f) stM.set(r.s,(stM.get(r.s)||0)+1);
   const stA=[...stM.entries()].sort((a,b)=>b[1]-a[1]);
@@ -986,16 +1022,71 @@ function upsertDoughnut(id,labels,data,colors){
         tooltip:{callbacks:{label:c=>{const v=c.raw;return ` ${fmtCLP(v)} · ${(v/total*100).toFixed(1)}%`;}}}}
     })});
 }
+function renderPurchaseManagementSignal(monthlyAmount,monthlyOrders,last){
+  const amount=monthlyAmount[last]||0;
+  const orders=monthlyOrders[last]||0;
+  const average=orders?amount/orders:0;
+  const previousAmount=last>0?(monthlyAmount[last-1]||0):0;
+  const previousOrders=last>0?(monthlyOrders[last-1]||0):0;
+  const previousAverage=previousOrders?previousAmount/previousOrders:0;
+  const orderChange=previousOrders?(orders-previousOrders)/previousOrders:0;
+  const averageChange=previousAverage?(average-previousAverage)/previousAverage:0;
+
+  const selectedHospitals=[...state.est];
+  const context=selectedHospitals.length===1?selectedHospitals[0]:'Red SSMOCC';
+  document.getElementById('trend-period').textContent=`${MESES[last]} 2026 · ${context}`;
+  document.getElementById('trend-amount').textContent=fmtCLP(amount);
+  document.getElementById('trend-orders').textContent=fmtNum(orders);
+  document.getElementById('trend-average').textContent=orders?fmtCLP(average):'Sin OC';
+
+  let level='stable';
+  let label='Actividad estable';
+  let message='La actividad mensual se mantiene sin una señal relevante de dispersión. Continúe monitoreando la planificación de compras.';
+  if(previousOrders&&orderChange>=.20&&averageChange<=-.20){
+    level='high';
+    label='Revisión prioritaria';
+    message='Aumentaron las OC y disminuyó su monto promedio. Revise requerimientos repetidos y oportunidades de consolidación o mecanismos más competitivos.';
+  }else if(previousOrders&&orderChange>=.10&&averageChange<=-.10){
+    level='review';
+    label='Revisar dispersión';
+    message='Se observa un aumento de OC junto con una disminución de su valor promedio. Se recomienda revisar la planificación mensual.';
+  }else if(last===0||!previousOrders){
+    level='info';
+    label='Período inicial';
+    message='Aún no existe un mes anterior comparable. Este período será la base para el seguimiento de la gestión.';
+  }else if(orderChange<0&&averageChange>0){
+    label='Mayor concentración';
+    message='Disminuyó la cantidad de OC y aumentó su valor promedio. Verifique si responde a una mejor consolidación de requerimientos.';
+  }
+
+  const card=document.getElementById('trend-signal-card');
+  const signal=document.getElementById('trend-signal');
+  card.className='rounded-lg border p-3 '+(
+    level==='high'?'bg-red-50 border-red-200':
+    level==='review'?'bg-amber-50 border-amber-200':
+    level==='info'?'bg-blue-50 border-blue-200':
+    'bg-emerald-50 border-emerald-200'
+  );
+  signal.className='text-[14px] font-extrabold mt-1 '+(
+    level==='high'?'text-red-700':
+    level==='review'?'text-amber-700':
+    level==='info'?'text-blue-700':
+    'text-emerald-700'
+  );
+  signal.textContent=label;
+  document.getElementById('trend-message').textContent=message;
+}
+
 function upsertTrend(id,labels,monto,cnt){
   paint(id,{type:'line',data:{labels,datasets:[
       {label:'Monto (M CLP)',data:monto,yAxisID:'y',borderColor:'#0063af',backgroundColor:'rgba(0,99,175,.10)',fill:true,tension:.35,pointRadius:3,pointBackgroundColor:'#0063af',borderWidth:2.5},
-      {label:'Líneas',data:cnt,yAxisID:'y1',borderColor:'#e2242c',backgroundColor:'transparent',borderDash:[5,4],tension:.35,pointRadius:3,pointBackgroundColor:'#e2242c',borderWidth:2}]},
+      {label:'OC únicas',data:cnt,yAxisID:'y1',borderColor:'#e2242c',backgroundColor:'transparent',borderDash:[5,4],tension:.35,pointRadius:3,pointBackgroundColor:'#e2242c',borderWidth:2}]},
     options:baseOpts({interaction:{mode:'index',intersect:false},
       scales:{x:{grid:{display:false},ticks:{font:{family:'Inter',size:11},color:'#475569'}},
         y:{position:'left',grid:{color:'#f1f5f9'},ticks:{font:{family:'Inter',size:10},color:'#0063af',callback:v=>'$'+v+'M'}},
         y1:{position:'right',grid:{display:false},ticks:{font:{family:'Inter',size:10},color:'#e2242c'}}},
       plugins:{legend:{display:true,position:'top',align:'end',labels:{font:{family:'Inter',size:11},usePointStyle:true,boxWidth:8,padding:14}},
-        tooltip:{callbacks:{label:c=>c.datasetIndex===0?' '+fmtCLP(c.raw*1e6):' '+fmtNum(c.raw)+' líneas'}}}
+        tooltip:{callbacks:{label:c=>c.datasetIndex===0?' '+fmtCLP(c.raw*1e6) :' '+fmtNum(c.raw)+' OC únicas'}}}
     })});
 }
 function paint(id,cfg){ if(charts[id]){charts[id].data=cfg.data;charts[id].options=cfg.options;charts[id].update();} else charts[id]=new Chart(document.getElementById(id),cfg); }
