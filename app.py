@@ -3489,19 +3489,22 @@ def apply_layout_patch(html: str) -> str:
     </style>
     """
     html = html.replace("</head>", patch + "\n</head>", 1)
-    trend_script = BASE_DIR / "trend_enhancement.js"
-    if trend_script.exists():
-        enhancement = trend_script.read_text(encoding="utf-8").replace(
-            "</script>", "<\\/script>"
-        )
+    enhancements = []
+    for script_name in ("trend_enhancement.js", "management_summary.js"):
+        script_path = BASE_DIR / script_name
+        if script_path.exists():
+            enhancements.append(
+                script_path.read_text(encoding="utf-8").replace(
+                    "</script>", "<\\/script>"
+                )
+            )
+    if enhancements:
         document, closing_body, trailing = html.rpartition("</body>")
         if closing_body:
-            html = (
-                document
-                + f"<script>{enhancement}</script>\n"
-                + closing_body
-                + trailing
+            injected_scripts = "\n".join(
+                f"<script>{enhancement}</script>" for enhancement in enhancements
             )
+            html = document + injected_scripts + "\n" + closing_body + trailing
     return html
 
 
