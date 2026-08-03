@@ -1324,6 +1324,405 @@ def portal_contracts_for_establishment(
         key=lambda row: normalize(row.get("licitacion")),
     )
 
+
+def _portal_contract_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(row.get("establecimiento_id") or "").strip(),
+        normalize(row.get("licitacion")),
+    )
+
+
+def upsert_portal_contracts(
+    db: SheetClient, records: list[dict[str, Any]]
+) -> None:
+    """Fusiona una edición múltiple con la versión más reciente de la hoja."""
+    current = [
+        dict(row)
+        for row in db.table("contratos").select("*").execute().data
+    ]
+    by_key = {
+        _portal_contract_key(row): row
+        for row in current if row.get("licitacion")
+    }
+    next_id = max(
+        [int(row.get("id") or 0) for row in current] + [0]
+    ) + 1
+    for incoming in records:
+        key = _portal_contract_key(incoming)
+        target = by_key.get(key)
+        if target is None:
+            target = {"id": next_id}
+            next_id += 1
+            current.append(target)
+            by_key[key] = target
+        target.update(incoming)
+    db.replace_records("contratos", current)
+
+
+@st.cache_data(show_spinner=False)
+def portal_template_xlsx(
+    establishment_name: str,
+    contracts: list[dict[str, Any]],
+) -> bytes:
+    """Crea una plantilla Excel profesional y precargada para el hospital."""
+    columns = [
+        "Establecimiento", "Instrumento", "OC", "Monto ejecutado",
+        "Monto adjudicado", "Fecha adjudicación", "Duración meses",
+        "Anticipación renovación meses", "Estado contractual",
+        "Responsable", "Observaciones",
+    ]
+    rows = []
+    for row in contracts:
+        rows.append({
+            "Establecimiento": establishment_name,
+            "Instrumento": row.get("licitacion") or "",
+            "OC": int(row.get("cantidad_oc") or 0),
+            "Monto ejecutado": float(row.get("monto_ejecutado") or 0),
+            "Monto adjudicado": float(row.get("monto_adjudicado") or 0),
+            "Fecha adjudicación": row.get("fecha_adjudicacion") or "",
+            "Duración meses": row.get("duracion_meses") or "",
+            "Anticipación renovación meses":
+                row.get("anticipacion_renovacion") or 6,
+            "Estado contractual": row.get("estado") or "Vigente",
+            "Responsable": row.get("responsable") or "",
+            "Observaciones": row.get("observaciones") or "",
+        })
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        frame = pd.DataFrame(rows, columns=columns)
+        frame.to_excel(writer, sheet_name="Contratos", index=False)
+        workbook = writer.book
+        instructions = workbook.create_sheet("Instrucciones", 0)
+        instructions["A1"] = "PLANTILLA DE ANTECEDENTES CONTRACTUALES"
+        instructions["A2"] = establishment_name
+        instructions["A4"] = "Cómo completar"
+        instructions["A5"] = (
+            "1. No modifique Establecimiento, Instrumento, OC ni Monto ejecutado."
+        )
+        instructions["A6"] = (
+            "2. Complete Monto adjudicado, Fecha adjudicación y Duración meses."
+        )
+        instructions["A7"] = (
+            "3. Use fechas con formato DD/MM/AAAA o AAAA-MM-DD."
+        )
+        instructions["A8"] = (
+            "4. Puede completar responsable, estado y observaciones."
+        )
+        instructions["A9"] = (
+            "5. Guarde el archivo y súbalo en Carga masiva del portal."
+        )
+        instructions["A11"] = (
+            "Seguridad: el portal solo aceptará instrumentos asociados "
+            "a este establecimiento."
+        )
+
+        from openpyxl.styles import Alignment, Font, PatternFill
+        navy = "003B6F"
+        blue = "0B6FB8"
+        light_blue = "DCEAF7"
+        gray = "E7ECF2"
+        white = "FFFFFF"
+
+        instructions["A1"].font = Font(
+            bold=True, size=16, color=white
+        )
+        instructions["A1"].fill = PatternFill("solid", fgColor=navy)
+        instructions["A2"].font = Font(
+            bold=True, size=13, color=navy
+        )
+        instructions["A4"].font = Font(
+            bold=True, size=12, color=blue
+        )
+        instructions.column_dimensions["A"].width = 95
+        for row_number in range(5, 12):
+            instructions[f"A{row_number}"].alignment = Alignment(wrap_text=True)
+        instructions.freeze_panes = "A4"
+
+        sheet = writer.sheets["Contratos"]
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        widths = [25, 24, 10, 18, 18, 18, 16, 24, 20, 24, 45]
+        for index, width in enumerate(widths, 1):
+            sheet.column_dimensions[
+                chr(64 + index) if index <= 26 else "A"
+            ].width = width
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color=white)
+            cell.fill = PatternFill("solid", fgColor=navy)
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+        for row_number in range(2, sheet.max_row + 1):
+            for column_number in (1, 2, 3, 4):
+                sheet.cell(row_number, column_number).fill = PatternFill(
+                    "solid", fgColor=gray
+                )
+            for column_number in range(5, 12):
+                sheet.cell(row_number, column_number).fill = PatternFill(
+                    "solid", fgColor=light_blue
+                )
+            sheet.cell(row_number, 4).number_format = '"$"#,##0'
+            sheet.cell(row_number, 5).number_format = '"$"#,##0'
+        sheet.sheet_view.showGridLines = False
+        sheet.row_dimensions[1].height = 32
+    return output.getvalue()
+
+
+def _portal_date(value: Any) -> str:
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return _contract_date(value)
+
+
+def _portal_record_from_row(
+    row: dict[str, Any],
+    establishment_id: Any,
+    username: str,
+) -> dict[str, Any] | None:
+    tender = str(row.get("Instrumento") or "").strip()
+    amount = _official_number(row.get("Monto adjudicado"))
+    award_date = _portal_date(row.get("Fecha adjudicación"))
+    duration = int(round(_official_number(row.get("Duración meses"))))
+    if not tender or amount <= 0 or not award_date or duration <= 0:
+        return None
+    renewal = int(round(_official_number(
+        row.get("Anticipación renovación meses") or 6
+    )))
+    return {
+        "establecimiento_id": establishment_id,
+        "licitacion": tender,
+        "monto_adjudicado": amount,
+        "fecha_adjudicacion": award_date,
+        "duracion_meses": duration,
+        "anticipacion_renovacion": max(0, renewal),
+        "estado": str(row.get("Estado contractual") or "Vigente").strip(),
+        "responsable": str(row.get("Responsable") or "").strip(),
+        "observaciones": str(row.get("Observaciones") or "").strip(),
+        "ultima_actualizacion": datetime.now().isoformat(timespec="seconds"),
+        "estado_revision": "Borrador",
+        "actualizado_por": username,
+    }
+
+
+def render_portal_quick_editor(
+    data: dict[str, Any],
+    db: SheetClient,
+    contracts: list[dict[str, Any]],
+    establishment_id: Any,
+    username: str,
+) -> None:
+    st.subheader("Edición rápida en línea")
+    st.caption(
+        "Busque instrumentos y complete varias filas directamente. "
+        "Solo se guardarán filas con monto, fecha y duración válidos."
+    )
+    left, middle, right = st.columns([3, 1, 1])
+    search = left.text_input(
+        "Buscar instrumento", placeholder="Ej.: 1641-121-LR24"
+    )
+    pending_only = middle.checkbox("Solo pendientes", value=True)
+    page_size = right.selectbox("Filas por página", [25, 50, 100], index=1)
+
+    filtered = []
+    for row in contracts:
+        if search and normalize(search) not in normalize(row.get("licitacion")):
+            continue
+        complete = bool(
+            row.get("monto_adjudicado")
+            and row.get("fecha_adjudicacion")
+            and row.get("duracion_meses")
+        )
+        if pending_only and complete:
+            continue
+        filtered.append(row)
+
+    pages = max(1, (len(filtered) + page_size - 1) // page_size)
+    page = st.number_input(
+        "Página", min_value=1, max_value=pages, value=1, step=1
+    )
+    start = (int(page) - 1) * page_size
+    visible = filtered[start:start + page_size]
+    st.caption(
+        f"Mostrando {start + 1 if visible else 0}–"
+        f"{start + len(visible)} de {len(filtered)} instrumentos."
+    )
+    editable_rows = [{
+        "Instrumento": row.get("licitacion") or "",
+        "OC": int(row.get("cantidad_oc") or 0),
+        "Monto ejecutado": float(row.get("monto_ejecutado") or 0),
+        "Monto adjudicado": float(row.get("monto_adjudicado") or 0),
+        "Fecha adjudicación": row.get("fecha_adjudicacion") or "",
+        "Duración meses": int(row.get("duracion_meses") or 0),
+        "Anticipación renovación meses": int(
+            row.get("anticipacion_renovacion") or 6
+        ),
+        "Estado contractual": row.get("estado") or "Vigente",
+        "Responsable": row.get("responsable") or "",
+        "Observaciones": row.get("observaciones") or "",
+    } for row in visible]
+    edited = st.data_editor(
+        pd.DataFrame(editable_rows),
+        use_container_width=True,
+        hide_index=True,
+        disabled=["Instrumento", "OC", "Monto ejecutado"],
+        num_rows="fixed",
+        column_config={
+            "Monto ejecutado": st.column_config.NumberColumn(format="$ %d"),
+            "Monto adjudicado": st.column_config.NumberColumn(
+                format="$ %d", min_value=0
+            ),
+            "Fecha adjudicación": st.column_config.TextColumn(
+                help="DD/MM/AAAA o AAAA-MM-DD"
+            ),
+            "Duración meses": st.column_config.NumberColumn(min_value=0),
+            "Observaciones": st.column_config.TextColumn(width="large"),
+        },
+        key=f"portal_quick_{page}_{pending_only}_{search}",
+    )
+    if st.button(
+        "💾 Guardar filas completas como borrador",
+        type="primary",
+        use_container_width=True,
+        disabled=edited.empty,
+    ):
+        allowed = {
+            normalize(row.get("licitacion")) for row in contracts
+        }
+        records = []
+        for source in edited.to_dict("records"):
+            if normalize(source.get("Instrumento")) not in allowed:
+                continue
+            record = _portal_record_from_row(
+                source, establishment_id, username
+            )
+            if record:
+                records.append(record)
+        if not records:
+            st.error(
+                "No hay filas completas. Ingrese monto adjudicado, fecha "
+                "y duración antes de guardar."
+            )
+            return
+        try:
+            upsert_portal_contracts(db, records)
+            db.table("historial_cambios").insert({
+                "contrato_id": "",
+                "establecimiento_id": establishment_id,
+                "usuario": username,
+                "accion": "Edición rápida",
+                "detalle": f"{len(records)} instrumentos guardados como borrador",
+                "fecha": datetime.now().isoformat(timespec="seconds"),
+            }).execute()
+            st.success(f"Se guardaron {len(records)} instrumentos.")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible guardar la edición rápida: {exc}")
+
+
+def render_portal_bulk_upload(
+    data: dict[str, Any],
+    db: SheetClient,
+    contracts: list[dict[str, Any]],
+    establishment_id: Any,
+    establishment_name: str,
+    username: str,
+) -> None:
+    st.subheader("Carga masiva con plantilla")
+    st.info(
+        "Descargue la plantilla precargada, complete las columnas azules "
+        "y vuelva a subir el archivo. Los datos quedarán como borrador."
+    )
+    template = portal_template_xlsx(establishment_name, contracts)
+    st.download_button(
+        "⬇️ Descargar plantilla Excel del establecimiento",
+        data=template,
+        file_name=(
+            "Plantilla_Contratos_"
+            + re.sub(r"[^A-Za-z0-9]+", "_", normalize(establishment_name))
+            + ".xlsx"
+        ),
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        use_container_width=True,
+    )
+    uploaded = st.file_uploader(
+        "Subir plantilla completada",
+        type=["xlsx"],
+        key="portal_contract_bulk",
+    )
+    records: list[dict[str, Any]] = []
+    omitted = 0
+    if uploaded:
+        try:
+            frame = pd.read_excel(uploaded, sheet_name="Contratos")
+            frame.columns = [str(column).strip() for column in frame.columns]
+            required = {
+                "Instrumento", "Monto adjudicado",
+                "Fecha adjudicación", "Duración meses",
+            }
+            missing = sorted(required - set(frame.columns))
+            if missing:
+                raise ValueError("Faltan columnas: " + ", ".join(missing))
+            allowed = {
+                normalize(row.get("licitacion")) for row in contracts
+            }
+            for source in frame.to_dict("records"):
+                if normalize(source.get("Instrumento")) not in allowed:
+                    omitted += 1
+                    continue
+                record = _portal_record_from_row(
+                    source, establishment_id, username
+                )
+                if record:
+                    records.append(record)
+                else:
+                    omitted += 1
+            a, b = st.columns(2)
+            a.metric("Filas listas para guardar", len(records))
+            b.metric("Filas incompletas u omitidas", omitted)
+            if records:
+                st.dataframe(
+                    pd.DataFrame(records)[[
+                        "licitacion", "monto_adjudicado",
+                        "fecha_adjudicacion", "duracion_meses",
+                        "responsable",
+                    ]].head(100),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        except Exception as exc:
+            st.error(f"No fue posible validar la plantilla: {exc}")
+            records = []
+
+    if st.button(
+        "📥 Guardar carga masiva como borrador",
+        type="primary",
+        use_container_width=True,
+        disabled=not records,
+    ):
+        try:
+            upsert_portal_contracts(db, records)
+            db.table("historial_cambios").insert({
+                "contrato_id": "",
+                "establecimiento_id": establishment_id,
+                "usuario": username,
+                "accion": "Carga masiva",
+                "detalle": f"{len(records)} instrumentos guardados como borrador",
+                "fecha": datetime.now().isoformat(timespec="seconds"),
+            }).execute()
+            st.success(
+                f"Carga finalizada: {len(records)} instrumentos guardados."
+            )
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible guardar la carga masiva: {exc}")
+
 def portal_login(data):
     user_id = st.session_state.get("portal_user_id")
     if user_id is not None:
@@ -1428,6 +1827,27 @@ def render_establishment_portal(data, db):
         progress,
         text=f"Avance de antecedentes completos: {completed} de {len(contracts)}",
     )
+
+    work_mode = st.radio(
+        "Forma de trabajo",
+        ["✏️ Edición rápida", "📥 Carga masiva", "🔎 Detalle individual"],
+        horizontal=True,
+        help=(
+            "Puede completar datos directamente, usar una plantilla Excel "
+            "o revisar un instrumento en detalle."
+        ),
+    )
+    username = str(user.get("usuario") or "")
+    if work_mode == "✏️ Edición rápida":
+        render_portal_quick_editor(
+            data, db, contracts, establishment_id, username
+        )
+        return
+    if work_mode == "📥 Carga masiva":
+        render_portal_bulk_upload(
+            data, db, contracts, establishment_id, name, username
+        )
+        return
 
     summary_rows = []
     for row in contracts:
