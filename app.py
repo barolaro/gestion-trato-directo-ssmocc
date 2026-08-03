@@ -971,6 +971,453 @@ def plan_history_for_html(
     return sorted(history, key=report_order)
 
 
+def password_hash(password: str) -> str:
+    iterations = 210_000
+    salt = pysecrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), bytes.fromhex(salt), iterations
+    ).hex()
+    return "pbkdf2_sha256$" + str(iterations) + "$" + salt + "$" + digest
+
+
+def password_matches(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected = str(encoded).split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt), int(iterations)
+        ).hex()
+        return hmac.compare_digest(digest, expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def same_id(left: Any, right: Any) -> bool:
+    return str(left or "").strip() == str(right or "").strip()
+
+
+def _active_user(value: Any) -> bool:
+    return value not in (False, "", 0, "0", "FALSE", "false", None)
+
+
+def render_user_admin(data, db):
+    st.subheader("👥 Usuarios por establecimiento")
+    st.info(
+        "Cada cuenta queda asociada a un solo establecimiento y no puede "
+        "consultar información de otros hospitales."
+    )
+    establishments = {
+        row.get("nombre"): row.get("id")
+        for row in data["establecimientos"]
+        if row.get("nombre") and row.get("id") is not None
+    }
+    users = [dict(row) for row in data.get("usuarios_establecimientos", [])]
+    id_names = {
+        str(row.get("id")): dashboard_name(row.get("nombre"))
+        for row in data["establecimientos"]
+    }
+    if users:
+        st.dataframe([{
+            "Usuario": row.get("usuario"),
+            "Responsable": row.get("nombre"),
+            "Establecimiento": id_names.get(
+                str(row.get("establecimiento_id")), ""
+            ),
+            "Estado": "Activo" if _active_user(row.get("activo")) else "Inactivo",
+        } for row in users], use_container_width=True, hide_index=True)
+
+    choices = ["Crear nueva cuenta"] + [
+        str(row.get("usuario")) for row in users if row.get("usuario")
+    ]
+    chosen = st.selectbox("Cuenta a gestionar", choices)
+    selected = next(
+        (row for row in users if row.get("usuario") == chosen), {}
+    )
+    establishment_names = list(establishments)
+    current_name = next((
+        name for name, establishment_id in establishments.items()
+        if same_id(establishment_id, selected.get("establecimiento_id"))
+    ), establishment_names[0] if establishment_names else "")
+    with st.form("user_form"):
+        username = st.text_input(
+            "Usuario", value=str(selected.get("usuario") or ""),
+            disabled=bool(selected)
+        )
+        person = st.text_input(
+            "Nombre responsable", value=str(selected.get("nombre") or "")
+        )
+        establishment = st.selectbox(
+            "Establecimiento", establishment_names,
+            index=establishment_names.index(current_name)
+            if current_name in establishment_names else 0
+        )
+        password = st.text_input(
+            "Contraseña temporal" if not selected
+            else "Nueva contraseña (opcional)",
+            type="password"
+        )
+        active = st.checkbox(
+            "Cuenta activa", value=_active_user(selected.get("activo", True))
+        )
+        save = st.form_submit_button(
+            "💾 Guardar cuenta", use_container_width=True
+        )
+    if save:
+        clean_user = username.strip().lower()
+        if len(clean_user) < 4:
+            st.error("El usuario debe tener al menos 4 caracteres.")
+            return
+        if (not selected and any(
+            normalize(row.get("usuario")) == normalize(clean_user)
+            for row in users
+        )):
+            st.error("Ese usuario ya existe.")
+            return
+        if (not selected and len(password) < 8) or (
+            password and len(password) < 8
+        ):
+            st.error("La contraseña debe tener al menos 8 caracteres.")
+            return
+        if selected:
+            for row in users:
+                if same_id(row.get("id"), selected.get("id")):
+                    row.update({
+                        "nombre": person.strip(),
+                        "establecimiento_id": establishments[establishment],
+                        "activo": active,
+                    })
+                    if password:
+                        row["clave_hash"] = password_hash(password)
+        else:
+            next_id = max([int(row.get("id") or 0) for row in users] + [0]) + 1
+            users.append({
+                "id": next_id, "usuario": clean_user,
+                "clave_hash": password_hash(password),
+                "establecimiento_id": establishments[establishment],
+                "nombre": person.strip(), "activo": active,
+                "creado": datetime.now().isoformat(timespec="seconds"),
+                "ultima_conexion": "",
+            })
+        try:
+            db.replace_records("usuarios_establecimientos", users)
+            st.success("Cuenta guardada de forma segura.")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible guardar la cuenta: {exc}")
+
+
+def _contract_date(value: Any) -> str:
+    text = str(value or "").strip()
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text[:10], fmt).date().isoformat()
+        except ValueError:
+            pass
+    return ""
+
+
+@st.cache_data(show_spinner=False)
+def parse_contract_bulk(file_name, file_bytes, establishments, contracts):
+    text = _decode_csv(file_bytes)
+    delimiter = ";" if text[:4096].count(";") >= text[:4096].count(",") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    headers = {
+        normalize(header): header for header in (reader.fieldnames or [])
+    }
+    if "establecimiento" not in headers or "instrumento" not in headers:
+        raise ValueError("Faltan las columnas Establecimiento e Instrumento.")
+    establishment_ids = {
+        dashboard_name(row.get("nombre")): row.get("id")
+        for row in establishments if row.get("id") is not None
+    }
+    merged = [dict(row) for row in contracts]
+    by_key = {
+        (str(row.get("establecimiento_id") or ""), normalize(row.get("licitacion"))): row
+        for row in merged if row.get("licitacion")
+    }
+    next_id = max([int(row.get("id") or 0) for row in merged] + [0]) + 1
+    created = updated = skipped = 0
+    field_map = {
+        "monto_adjudicado": "monto adjudicado",
+        "fecha_adjudicacion": "fecha adjudicacion",
+        "duracion_meses": "duracion meses",
+        "anticipacion_renovacion": "anticipacion renovacion meses",
+        "responsable": "responsable", "estado": "estado contractual",
+        "observaciones": "observaciones",
+    }
+    for source in reader:
+        establishment_id = establishment_ids.get(
+            dashboard_name(source.get(headers["establecimiento"], ""))
+        )
+        instrument = str(source.get(headers["instrumento"], "") or "").strip()
+        if establishment_id is None or not instrument:
+            skipped += 1
+            continue
+        key = (str(establishment_id), normalize(instrument))
+        target = by_key.get(key)
+        if target is None:
+            target = {
+                "id": next_id, "establecimiento_id": establishment_id,
+                "licitacion": instrument, "monto_adjudicado": 0,
+                "fecha_adjudicacion": "", "duracion_meses": "",
+                "anticipacion_renovacion": 6, "estado": "Vigente",
+                "responsable": "", "observaciones": "",
+                "estado_revision": "Incompleto",
+                "enviado_revision": "", "actualizado_por": "carga_masiva",
+            }
+            next_id += 1
+            merged.append(target)
+            by_key[key] = target
+            created += 1
+        else:
+            updated += 1
+        for destination, source_name in field_map.items():
+            header = headers.get(source_name)
+            raw = str(source.get(header, "") or "").strip() if header else ""
+            if not raw:
+                continue
+            if destination in (
+                "monto_adjudicado", "duracion_meses",
+                "anticipacion_renovacion"
+            ):
+                target[destination] = int(round(_official_number(raw)))
+            elif destination == "fecha_adjudicacion":
+                parsed = _contract_date(raw)
+                if parsed:
+                    target[destination] = parsed
+            else:
+                target[destination] = raw
+        target["ultima_actualizacion"] = datetime.now().isoformat(
+            timespec="seconds"
+        )
+        target["actualizado_por"] = "carga_masiva"
+    return merged, {"created": created, "updated": updated, "skipped": skipped}
+
+
+def render_contract_bulk_admin(data, db):
+    st.subheader("📥 Carga masiva contractual")
+    st.info(
+        "Actualiza por Establecimiento + Instrumento. No duplica registros "
+        "ni borra campos completos cuando el CSV los trae vacíos."
+    )
+    uploaded = st.file_uploader(
+        "Seleccionar CSV contractual", type=["csv"], key="contract_bulk"
+    )
+    merged, stats = [], {}
+    if uploaded:
+        try:
+            merged, stats = parse_contract_bulk(
+                uploaded.name, uploaded.getvalue(),
+                data["establecimientos"], data["contratos"]
+            )
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Nuevos", stats["created"])
+            c2.metric("Actualizados", stats["updated"])
+            c3.metric("Omitidos", stats["skipped"])
+        except Exception as exc:
+            st.error(f"No fue posible validar el archivo: {exc}")
+    if st.button(
+        "📥 Incorporar contratos sin duplicados", type="primary",
+        use_container_width=True, disabled=not merged
+    ):
+        try:
+            db.replace_records("contratos", merged)
+            st.success("Carga contractual incorporada correctamente.")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible guardar la carga: {exc}")
+
+
+def portal_login(data):
+    user_id = st.session_state.get("portal_user_id")
+    if user_id is not None:
+        current = next((
+            row for row in data.get("usuarios_establecimientos", [])
+            if same_id(row.get("id"), user_id)
+            and _active_user(row.get("activo"))
+        ), None)
+        if current:
+            return current
+        st.session_state.pop("portal_user_id", None)
+
+    st.markdown("## 🏥 Portal de establecimientos")
+    st.caption("Complete y remita antecedentes contractuales al SSMOCC.")
+    with st.form("portal_login"):
+        username = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        submit = st.form_submit_button(
+            "Ingresar al portal", use_container_width=True
+        )
+    if submit:
+        current = next((
+            row for row in data.get("usuarios_establecimientos", [])
+            if normalize(row.get("usuario")) == normalize(username)
+            and _active_user(row.get("activo"))
+        ), None)
+        if current and password_matches(
+            password, str(current.get("clave_hash") or "")
+        ):
+            st.session_state["portal_user_id"] = current.get("id")
+            st.rerun()
+        st.error("Usuario o contraseña incorrectos.")
+    if st.button("← Volver al dashboard"):
+        st.query_params.clear()
+        st.rerun()
+    return None
+
+
+def render_establishment_portal(data, db):
+    user = portal_login(data)
+    if not user:
+        return
+    establishment_id = user.get("establecimiento_id")
+    establishment = next((
+        row for row in data["establecimientos"]
+        if same_id(row.get("id"), establishment_id)
+    ), {})
+    name = dashboard_name(establishment.get("nombre") or "Establecimiento")
+    left, right = st.columns([6, 1])
+    left.success(
+        f"Sesión activa · {name} · {user.get('nombre') or user.get('usuario')}"
+    )
+    if right.button("Cerrar sesión"):
+        st.session_state.pop("portal_user_id", None)
+        st.query_params.clear()
+        st.rerun()
+
+    contracts = [
+        dict(row) for row in data["contratos"]
+        if same_id(row.get("establecimiento_id"), establishment_id)
+    ]
+    incomplete = sum(
+        1 for row in contracts if not row.get("monto_adjudicado")
+        or not row.get("fecha_adjudicacion") or not row.get("duracion_meses")
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Contratos", len(contracts))
+    c2.metric("Incompletos", incomplete)
+    c3.metric("En revisión", sum(
+        normalize(row.get("estado_revision")) == "enviado" for row in contracts
+    ))
+    c4.metric("Validados", sum(
+        normalize(row.get("estado_revision")) == "validado" for row in contracts
+    ))
+    if not contracts:
+        st.info("El administrador todavía no ha asignado instrumentos.")
+        return
+    options = {
+        f"{row.get('licitacion')} · {row.get('estado_revision') or 'Incompleto'}": row
+        for row in contracts
+    }
+    selected = options[st.selectbox("Instrumento a completar", list(options))]
+    locked = normalize(selected.get("estado_revision")) == "validado"
+    try:
+        default_date = date.fromisoformat(str(selected.get("fecha_adjudicacion")))
+    except ValueError:
+        default_date = date.today()
+    with st.form("portal_contract_form"):
+        st.text_input(
+            "Licitación / instrumento",
+            value=str(selected.get("licitacion") or ""), disabled=True
+        )
+        amount = st.number_input(
+            "Monto adjudicado", min_value=0.0, step=100000.0,
+            value=float(selected.get("monto_adjudicado") or 0),
+            format="%.0f", disabled=locked
+        )
+        award_date = st.date_input(
+            "Fecha de adjudicación", default_date, disabled=locked
+        )
+        col1, col2 = st.columns(2)
+        duration = col1.number_input(
+            "Duración (meses)", 1, 240,
+            int(selected.get("duracion_meses") or 12), disabled=locked
+        )
+        renewal = col2.number_input(
+            "Anticipación de renovación (meses)", 0, 36,
+            int(selected.get("anticipacion_renovacion") or 6),
+            disabled=locked
+        )
+        statuses = [
+            "Vigente", "En renovación", "Prorrogado",
+            "Finalizado", "Suspendido"
+        ]
+        current_status = str(selected.get("estado") or "Vigente")
+        status = st.selectbox(
+            "Estado contractual", statuses,
+            index=statuses.index(current_status)
+            if current_status in statuses else 0, disabled=locked
+        )
+        manager = st.text_input(
+            "Responsable", str(selected.get("responsable") or ""),
+            disabled=locked
+        )
+        observations = st.text_area(
+            "Observaciones", str(selected.get("observaciones") or ""),
+            disabled=locked
+        )
+        b1, b2 = st.columns(2)
+        draft = b1.form_submit_button(
+            "💾 Guardar borrador", use_container_width=True, disabled=locked
+        )
+        send = b2.form_submit_button(
+            "📨 Enviar a revisión SSMOCC", use_container_width=True,
+            type="primary", disabled=locked
+        )
+    if locked:
+        st.info("Registro validado por el SSMOCC y bloqueado para edición.")
+    if draft or send:
+        if send and (amount <= 0 or not manager.strip()):
+            st.error("Completa monto adjudicado y responsable para enviar.")
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        payload = {
+            "monto_adjudicado": amount,
+            "fecha_adjudicacion": award_date.isoformat(),
+            "duracion_meses": int(duration),
+            "anticipacion_renovacion": int(renewal),
+            "estado": status, "responsable": manager.strip(),
+            "observaciones": observations.strip(),
+            "ultima_actualizacion": now,
+            "estado_revision": "Enviado" if send else "Borrador",
+            "enviado_revision": now if send else str(
+                selected.get("enviado_revision") or ""
+            ),
+            "actualizado_por": str(user.get("usuario") or ""),
+        }
+        all_contracts = [dict(row) for row in data["contratos"]]
+        for row in all_contracts:
+            if same_id(row.get("id"), selected.get("id")):
+                row.update(payload)
+        history = [dict(row) for row in data.get("historial_cambios", [])]
+        history.append({
+            "id": max([int(row.get("id") or 0) for row in history] + [0]) + 1,
+            "contrato_id": selected.get("id"),
+            "establecimiento_id": establishment_id,
+            "usuario": user.get("usuario"),
+            "accion": "Enviado" if send else "Borrador",
+            "detalle": json.dumps(payload, ensure_ascii=False),
+            "fecha": now,
+        })
+        try:
+            db.replace_records("contratos", all_contracts)
+            db.replace_records("historial_cambios", history)
+            st.success(
+                "Antecedentes enviados al SSMOCC."
+                if send else "Borrador guardado."
+            )
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"No fue posible guardar: {exc}")
+    if st.button("← Volver al dashboard"):
+        st.query_params.clear()
+        st.rerun()
+
+
 def admin_login() -> bool:
     configured = secret("ADMIN_PASSWORD")
     if not configured:
