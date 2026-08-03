@@ -1452,7 +1452,7 @@ def excluded_contract_instrument(
     normalized_channel = normalize(channel)
     tender_text = str(tender or "").strip().upper()
     is_cot_reference = bool(
-        re.search(r"(?:^|[-_\\s])COT(?:\\d|[-_\\s]|$)", tender_text)
+        re.search(r"(?:^|[-_\s])COT(?:\d|[-_\s]|$)", tender_text)
     )
     return normalized_channel == "compra agil" or is_cot_reference
 
