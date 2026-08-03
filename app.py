@@ -3490,7 +3490,7 @@ def apply_layout_patch(html: str) -> str:
     """
     html = html.replace("</head>", patch + "\n</head>", 1)
     enhancements = []
-    for script_name in ("trend_enhancement.js", "management_summary.js"):
+    for script_name in (\n        "trend_enhancement.js",\n        "management_summary.js",\n        "contractual_filter.js",\n    ):
         script_path = BASE_DIR / script_name
         if script_path.exists():
             enhancements.append(
