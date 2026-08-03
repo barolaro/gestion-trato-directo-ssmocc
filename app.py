@@ -3,9 +3,12 @@ from __future__ import annotations
 import base64
 import csv
 import gzip
+import hashlib
+import hmac
 import io
 import json
 import re
+import secrets as pysecrets
 import unicodedata
 import zipfile
 from datetime import date, datetime, timedelta
@@ -74,6 +77,7 @@ SHEET_SCHEMAS: dict[str, list[str]] = {
         "id", "establecimiento_id", "licitacion", "monto_adjudicado",
         "fecha_adjudicacion", "duracion_meses", "anticipacion_renovacion",
         "estado", "responsable", "observaciones", "ultima_actualizacion",
+        "estado_revision", "enviado_revision", "actualizado_por",
     ],
     "planes": [
         "id", "nombre_archivo", "reporte", "periodo", "fecha_publicacion",
@@ -93,6 +97,14 @@ SHEET_SCHEMAS: dict[str, list[str]] = {
         "id", "establecimiento_id", "reporte", "periodo", "codigo_deis",
         "denominador", "numerador", "porcentaje_td", "nivel",
         "nombre_archivo", "fecha_carga",
+    ],
+    "usuarios_establecimientos": [
+        "id", "usuario", "clave_hash", "establecimiento_id",
+        "nombre", "activo", "creado", "ultima_conexion",
+    ],
+    "historial_cambios": [
+        "id", "contrato_id", "establecimiento_id", "usuario",
+        "accion", "detalle", "fecha",
     ],
 }
 
@@ -394,6 +406,25 @@ def ensure_optional_sheet(name: str) -> bool:
         )
     return worksheet is not None
 
+@st.cache_resource
+def ensure_all_sheets() -> bool:
+    """Crea de una vez las pestañas faltantes con una sola lectura de metadatos."""
+    spreadsheet = _spreadsheet()
+    if spreadsheet is None:
+        return False
+    existing = {worksheet.title: worksheet for worksheet in spreadsheet.worksheets()}
+    for name, headers in SHEET_SCHEMAS.items():
+        if name in existing:
+            continue
+        worksheet = spreadsheet.add_worksheet(
+            title=name, rows=200, cols=len(headers)
+        )
+        worksheet.update(
+            range_name="A1", values=[headers], value_input_option="RAW"
+        )
+        existing[name] = worksheet
+    return True
+
 
 def safe_read(table: str, columns: str = "*") -> list[dict[str, Any]]:
     try:
@@ -449,6 +480,7 @@ def batch_read_tables() -> dict[str, list[dict[str, Any]]]:
 @st.cache_data(ttl=60, show_spinner=False)
 def load_data() -> dict[str, list[dict[str, Any]]]:
     try:
+        ensure_all_sheets()
         tables = batch_read_tables()
     except Exception as exc:
         st.warning(
@@ -474,6 +506,10 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
         "plan_trabajo": tables.get("plan_trabajo", []),
         "cargas_mensuales": tables.get("cargas_mensuales", []),
         "resultados_minsal": tables.get("resultados_minsal", []),
+        "usuarios_establecimientos": tables.get(
+            "usuarios_establecimientos", []
+        ),
+        "historial_cambios": tables.get("historial_cambios", []),
         "dataset_gzip_b64": dataset_gzip_b64,
     }
 
