@@ -1208,39 +1208,226 @@ def parse_contract_bulk(file_name, file_bytes, establishments, contracts):
 
 
 def render_contract_bulk_admin(data, db):
-    st.subheader("📥 Carga masiva contractual")
+    st.subheader("📥 Gestión centralizada de antecedentes contractuales")
     st.info(
-        "Actualiza por Establecimiento + Instrumento. No duplica registros "
-        "ni borra campos completos cuando el CSV los trae vacíos."
+        "Seleccione un establecimiento, descargue la plantilla con los "
+        "antecedentes pendientes y, cuando el hospital la devuelva, "
+        "incorpórela desde esta misma sección."
     )
+
+    establishments = [
+        row for row in data.get("establecimientos", [])
+        if row.get("id") is not None and row.get("nombre")
+    ]
+    if not establishments:
+        st.error("No existen establecimientos configurados.")
+        return
+
+    establishment_options = {
+        dashboard_name(row.get("nombre")): row
+        for row in establishments
+    }
+    selected_name = st.selectbox(
+        "Establecimiento a gestionar",
+        list(establishment_options),
+        help=(
+            "La plantilla y la carga quedarán restringidas al "
+            "establecimiento seleccionado."
+        ),
+    )
+    selected_establishment = establishment_options[selected_name]
+    establishment_id = selected_establishment.get("id")
+    contracts = portal_contracts_for_establishment(
+        data, establishment_id, selected_name
+    )
+    missing_contracts = [
+        row for row in contracts
+        if not row.get("monto_adjudicado")
+        or not row.get("fecha_adjudicacion")
+        or not row.get("duracion_meses")
+    ]
+    completed = len(contracts) - len(missing_contracts)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Instrumentos detectados", len(contracts))
+    c2.metric("Antecedentes completos", completed)
+    c3.metric("Pendientes por solicitar", len(missing_contracts))
+
+    if contracts:
+        st.progress(
+            completed / len(contracts),
+            text=(
+                f"Avance de {selected_name}: "
+                f"{completed} de {len(contracts)} completos"
+            ),
+        )
+
+    st.markdown("### 1. Descargar solicitud para el hospital")
+    if not missing_contracts:
+        st.success(
+            "Este establecimiento no tiene antecedentes contractuales "
+            "pendientes en la base actual."
+        )
+    else:
+        st.caption(
+            "La plantilla contiene únicamente instrumentos donde falta "
+            "monto adjudicado, fecha de adjudicación o duración."
+        )
+        template = portal_template_xlsx(
+            selected_name, missing_contracts
+        )
+        st.download_button(
+            "⬇️ Descargar plantilla Excel de antecedentes pendientes",
+            data=template,
+            file_name=(
+                "Pendientes_Contractuales_"
+                + re.sub(
+                    r"[^A-Za-z0-9]+", "_", normalize(selected_name)
+                )
+                + ".xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+            type="primary",
+        )
+        preview = [{
+            "Instrumento": row.get("licitacion"),
+            "OC": int(row.get("cantidad_oc") or 0),
+            "Monto ejecutado": float(row.get("monto_ejecutado") or 0),
+            "Falta monto": "Sí" if not row.get("monto_adjudicado") else "No",
+            "Falta fecha": "Sí" if not row.get("fecha_adjudicacion") else "No",
+            "Falta duración": "Sí" if not row.get("duracion_meses") else "No",
+        } for row in missing_contracts]
+        with st.expander(
+            f"Ver los {len(missing_contracts)} antecedentes solicitados"
+        ):
+            st.dataframe(
+                preview,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Monto ejecutado": st.column_config.NumberColumn(
+                        format="$ %d"
+                    )
+                },
+            )
+
+    st.markdown("### 2. Incorporar respuesta del hospital")
     uploaded = st.file_uploader(
-        "Seleccionar CSV contractual", type=["csv"], key="contract_bulk"
+        "Seleccionar plantilla Excel completada",
+        type=["xlsx"],
+        key=f"admin_contract_bulk_{establishment_id}",
+        help=(
+            "Utilice la misma plantilla descargada desde esta sección. "
+            "El sistema no aceptará instrumentos de otro hospital."
+        ),
     )
-    merged, stats = [], {}
+    review_status = st.selectbox(
+        "Estado después de incorporar",
+        ["Borrador", "Validado"],
+        help=(
+            "Borrador permite revisar posteriormente. Validado bloquea "
+            "la edición del establecimiento."
+        ),
+    )
+
+    records: list[dict[str, Any]] = []
+    omitted = 0
     if uploaded:
         try:
-            merged, stats = parse_contract_bulk(
-                uploaded.name, uploaded.getvalue(),
-                data["establecimientos"], data["contratos"]
-            )
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Nuevos", stats["created"])
-            c2.metric("Actualizados", stats["updated"])
-            c3.metric("Omitidos", stats["skipped"])
+            frame = pd.read_excel(uploaded, sheet_name="Contratos")
+            frame.columns = [
+                str(column).strip() for column in frame.columns
+            ]
+            required = {
+                "Instrumento", "Monto adjudicado",
+                "Fecha adjudicación", "Duración meses",
+            }
+            missing_columns = sorted(required - set(frame.columns))
+            if missing_columns:
+                raise ValueError(
+                    "Faltan columnas: " + ", ".join(missing_columns)
+                )
+
+            allowed = {
+                normalize(row.get("licitacion")) for row in contracts
+            }
+            for source in frame.to_dict("records"):
+                if normalize(source.get("Instrumento")) not in allowed:
+                    omitted += 1
+                    continue
+                record = _portal_record_from_row(
+                    source, establishment_id, "administrador"
+                )
+                if record:
+                    record["estado_revision"] = review_status
+                    records.append(record)
+                else:
+                    omitted += 1
+
+            v1, v2, v3 = st.columns(3)
+            v1.metric("Filas del archivo", len(frame))
+            v2.metric("Listas para incorporar", len(records))
+            v3.metric("Incompletas u omitidas", omitted)
+
+            if records:
+                st.success(
+                    "Archivo validado. Revise la vista previa antes "
+                    "de incorporar."
+                )
+                preview_frame = pd.DataFrame(records)[[
+                    "licitacion", "monto_adjudicado",
+                    "fecha_adjudicacion", "duracion_meses",
+                    "responsable", "estado_revision",
+                ]]
+                st.dataframe(
+                    preview_frame.head(200),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "monto_adjudicado":
+                            st.column_config.NumberColumn(format="$ %d")
+                    },
+                )
         except Exception as exc:
-            st.error(f"No fue posible validar el archivo: {exc}")
+            st.error(f"No fue posible validar la plantilla: {exc}")
+            records = []
+
+    confirm = st.checkbox(
+        "Confirmo que revisé la vista previa y deseo actualizar "
+        f"únicamente {selected_name}.",
+        disabled=not records,
+    )
     if st.button(
-        "📥 Incorporar contratos sin duplicados", type="primary",
-        use_container_width=True, disabled=not merged
+        "📥 Incorporar antecedentes validados",
+        type="primary",
+        use_container_width=True,
+        disabled=not records or not confirm,
     ):
         try:
-            db.replace_records("contratos", merged)
-            st.success("Carga contractual incorporada correctamente.")
+            upsert_portal_contracts(db, records)
+            db.table("historial_cambios").insert({
+                "contrato_id": "",
+                "establecimiento_id": establishment_id,
+                "usuario": "administrador",
+                "accion": "Carga centralizada",
+                "detalle": (
+                    f"{len(records)} instrumentos incorporados para "
+                    f"{selected_name} con estado {review_status}"
+                ),
+                "fecha": datetime.now().isoformat(timespec="seconds"),
+            }).execute()
+            st.success(
+                f"Carga completada: {len(records)} instrumentos "
+                f"actualizados para {selected_name}."
+            )
             st.cache_data.clear()
             st.rerun()
         except Exception as exc:
-            st.error(f"No fue posible guardar la carga: {exc}")
-
+            st.error(f"No fue posible incorporar la carga: {exc}")
 
 
 @st.cache_data(show_spinner=False)
