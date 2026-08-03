@@ -1032,7 +1032,7 @@ function renderPurchaseManagementSignal(monthlyAmount,monthlyOrders,last){
   const orderChange=previousOrders?(orders-previousOrders)/previousOrders:0;
   const averageChange=previousAverage?(average-previousAverage)/previousAverage:0;
 
-  const selectedHospitals=[...state.est];
+  const selectedHospitals=[...state.estabs];
   const context=selectedHospitals.length===1?selectedHospitals[0]:'Red SSMOCC';
   document.getElementById('trend-period').textContent=`${MESES[last]} 2026 · ${context}`;
   document.getElementById('trend-amount').textContent=fmtCLP(amount);
