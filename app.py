@@ -1284,12 +1284,16 @@ def render_establishment_portal(data, db):
     user = portal_login(data)
     if not user:
         return
+
+    # Mantiene el portal en la misma página durante todos los reruns.
+    st.query_params["portal"] = "1"
     establishment_id = user.get("establecimiento_id")
     establishment = next((
         row for row in data["establecimientos"]
         if same_id(row.get("id"), establishment_id)
     ), {})
     name = dashboard_name(establishment.get("nombre") or "Establecimiento")
+
     left, right = st.columns([6, 1])
     left.success(
         f"Sesión activa · {name} · {user.get('nombre') or user.get('usuario')}"
@@ -1299,98 +1303,205 @@ def render_establishment_portal(data, db):
         st.query_params.clear()
         st.rerun()
 
+    st.title("Portal de gestión contractual")
+    st.caption(
+        "Complete los antecedentes de sus instrumentos. Este portal muestra "
+        "exclusivamente los registros asociados a su establecimiento."
+    )
+
     contracts = [
         dict(row) for row in data["contratos"]
         if same_id(row.get("establecimiento_id"), establishment_id)
     ]
     incomplete = sum(
-        1 for row in contracts if not row.get("monto_adjudicado")
-        or not row.get("fecha_adjudicacion") or not row.get("duracion_meses")
+        1 for row in contracts
+        if not row.get("monto_adjudicado")
+        or not row.get("fecha_adjudicacion")
+        or not row.get("duracion_meses")
     )
+    in_review = sum(
+        normalize(row.get("estado_revision")) == "enviado"
+        for row in contracts
+    )
+    validated = sum(
+        normalize(row.get("estado_revision")) == "validado"
+        for row in contracts
+    )
+    completed = max(0, len(contracts) - incomplete)
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Contratos", len(contracts))
-    c2.metric("Incompletos", incomplete)
-    c3.metric("En revisión", sum(
-        normalize(row.get("estado_revision")) == "enviado" for row in contracts
-    ))
-    c4.metric("Validados", sum(
-        normalize(row.get("estado_revision")) == "validado" for row in contracts
-    ))
+    c1.metric("Instrumentos asignados", len(contracts))
+    c2.metric("Pendientes de completar", incomplete)
+    c3.metric("En revisión SSMOCC", in_review)
+    c4.metric("Validados", validated)
+
     if not contracts:
-        st.info("El administrador todavía no ha asignado instrumentos.")
+        st.info(
+            "El administrador todavía no ha asignado instrumentos a este "
+            "establecimiento."
+        )
         return
+
+    progress = completed / len(contracts) if contracts else 0
+    st.progress(
+        progress,
+        text=f"Avance de antecedentes completos: {completed} de {len(contracts)}",
+    )
+
+    summary_rows = []
+    for row in contracts:
+        complete = bool(
+            row.get("monto_adjudicado")
+            and row.get("fecha_adjudicacion")
+            and row.get("duracion_meses")
+        )
+        summary_rows.append({
+            "Instrumento": row.get("licitacion") or "Sin código",
+            "Antecedentes": "Completos" if complete else "Pendientes",
+            "Revisión SSMOCC": row.get("estado_revision") or "Incompleto",
+            "Última actualización": row.get("ultima_actualizacion") or "—",
+        })
+    st.dataframe(
+        summary_rows, use_container_width=True, hide_index=True,
+        column_config={
+            "Instrumento": st.column_config.TextColumn(width="medium"),
+            "Antecedentes": st.column_config.TextColumn(width="small"),
+            "Revisión SSMOCC": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+    st.subheader("Completar o actualizar un instrumento")
+    st.info(
+        "Seleccione una licitación, complete monto adjudicado, fecha y "
+        "duración; luego guarde un borrador o envíelo a revisión."
+    )
     options = {
-        f"{row.get('licitacion')} · {row.get('estado_revision') or 'Incompleto'}": row
+        (
+            f"{row.get('licitacion') or 'Sin código'} · "
+            f"{row.get('estado_revision') or 'Incompleto'}"
+        ): row
         for row in contracts
     }
-    selected = options[st.selectbox("Instrumento a completar", list(options))]
+    selected_label = st.selectbox(
+        "Instrumento a gestionar", list(options),
+        help="Solo aparecen instrumentos pertenecientes a su establecimiento.",
+    )
+    selected = options[selected_label]
     locked = normalize(selected.get("estado_revision")) == "validado"
+
+    raw_date = str(selected.get("fecha_adjudicacion") or "").strip()
     try:
-        default_date = date.fromisoformat(str(selected.get("fecha_adjudicacion")))
-    except ValueError:
+        default_date = date.fromisoformat(raw_date)
+    except (TypeError, ValueError):
         default_date = date.today()
-    with st.form("portal_contract_form"):
+
+    review_status = selected.get("estado_revision") or "Incompleto"
+    if locked:
+        st.success(
+            "Este instrumento fue validado por el SSMOCC y quedó bloqueado "
+            "para proteger la información oficial."
+        )
+    elif normalize(review_status) == "enviado":
+        st.warning(
+            "Este instrumento está en revisión. Puede actualizarlo y volver "
+            "a enviarlo mientras no haya sido validado."
+        )
+
+    with st.form("portal_contract_form", clear_on_submit=False):
         st.text_input(
             "Licitación / instrumento",
-            value=str(selected.get("licitacion") or ""), disabled=True
+            value=str(selected.get("licitacion") or ""),
+            disabled=True,
         )
-        amount = st.number_input(
-            "Monto adjudicado", min_value=0.0, step=100000.0,
+        first, second, third = st.columns([1.3, 1, 1])
+        amount = first.number_input(
+            "Monto adjudicado (CLP)",
+            min_value=0.0,
+            step=100000.0,
             value=float(selected.get("monto_adjudicado") or 0),
-            format="%.0f", disabled=locked
+            format="%.0f",
+            disabled=locked,
+            help="Ingrese el monto total adjudicado del instrumento.",
         )
-        award_date = st.date_input(
-            "Fecha de adjudicación", default_date, disabled=locked
+        award_date = second.date_input(
+            "Fecha de adjudicación",
+            value=default_date,
+            format="DD/MM/YYYY",
+            disabled=locked,
         )
+        duration = third.number_input(
+            "Duración del contrato (meses)",
+            min_value=1,
+            max_value=240,
+            value=int(selected.get("duracion_meses") or 12),
+            disabled=locked,
+        )
+
         col1, col2 = st.columns(2)
-        duration = col1.number_input(
-            "Duración (meses)", 1, 240,
-            int(selected.get("duracion_meses") or 12), disabled=locked
-        )
-        renewal = col2.number_input(
-            "Anticipación de renovación (meses)", 0, 36,
-            int(selected.get("anticipacion_renovacion") or 6),
-            disabled=locked
+        renewal = col1.number_input(
+            "Anticipación de renovación (meses)",
+            min_value=0,
+            max_value=36,
+            value=int(selected.get("anticipacion_renovacion") or 6),
+            disabled=locked,
         )
         statuses = [
             "Vigente", "En renovación", "Prorrogado",
-            "Finalizado", "Suspendido"
+            "Finalizado", "Suspendido",
         ]
         current_status = str(selected.get("estado") or "Vigente")
-        status = st.selectbox(
-            "Estado contractual", statuses,
+        status = col2.selectbox(
+            "Estado contractual",
+            statuses,
             index=statuses.index(current_status)
-            if current_status in statuses else 0, disabled=locked
+            if current_status in statuses else 0,
+            disabled=locked,
         )
         manager = st.text_input(
-            "Responsable", str(selected.get("responsable") or ""),
-            disabled=locked
+            "Responsable del contrato",
+            value=str(selected.get("responsable") or ""),
+            disabled=locked,
         )
         observations = st.text_area(
-            "Observaciones", str(selected.get("observaciones") or ""),
-            disabled=locked
+            "Observaciones",
+            value=str(selected.get("observaciones") or ""),
+            disabled=locked,
+            placeholder="Registre antecedentes, alertas o comentarios relevantes.",
         )
         b1, b2 = st.columns(2)
         draft = b1.form_submit_button(
-            "💾 Guardar borrador", use_container_width=True, disabled=locked
+            "💾 Guardar borrador",
+            use_container_width=True,
+            disabled=locked,
         )
         send = b2.form_submit_button(
-            "📨 Enviar a revisión SSMOCC", use_container_width=True,
-            type="primary", disabled=locked
+            "📨 Enviar a revisión SSMOCC",
+            use_container_width=True,
+            type="primary",
+            disabled=locked,
         )
-    if locked:
-        st.info("Registro validado por el SSMOCC y bloqueado para edición.")
+
     if draft or send:
-        if send and (amount <= 0 or not manager.strip()):
-            st.error("Completa monto adjudicado y responsable para enviar.")
+        if amount <= 0:
+            st.error("Debe ingresar un monto adjudicado mayor que cero.")
             return
+        if int(duration) <= 0:
+            st.error("Debe ingresar la duración del contrato.")
+            return
+        if send and not manager.strip():
+            st.error(
+                "Para enviar a revisión debe indicar el responsable del contrato."
+            )
+            return
+
         now = datetime.now().isoformat(timespec="seconds")
         payload = {
             "monto_adjudicado": amount,
             "fecha_adjudicacion": award_date.isoformat(),
             "duracion_meses": int(duration),
             "anticipacion_renovacion": int(renewal),
-            "estado": status, "responsable": manager.strip(),
+            "estado": status,
+            "responsable": manager.strip(),
             "observaciones": observations.strip(),
             "ultima_actualizacion": now,
             "estado_revision": "Enviado" if send else "Borrador",
@@ -1399,35 +1510,36 @@ def render_establishment_portal(data, db):
             ),
             "actualizado_por": str(user.get("usuario") or ""),
         }
-        all_contracts = [dict(row) for row in data["contratos"]]
-        for row in all_contracts:
-            if same_id(row.get("id"), selected.get("id")):
-                row.update(payload)
-        history = [dict(row) for row in data.get("historial_cambios", [])]
-        history.append({
-            "id": max([int(row.get("id") or 0) for row in history] + [0]) + 1,
+        history_payload = {
             "contrato_id": selected.get("id"),
             "establecimiento_id": establishment_id,
             "usuario": user.get("usuario"),
             "accion": "Enviado" if send else "Borrador",
             "detalle": json.dumps(payload, ensure_ascii=False),
             "fecha": now,
-        })
+        }
         try:
-            db.replace_records("contratos", all_contracts)
-            db.replace_records("historial_cambios", history)
+            db.table("contratos").update(payload).eq(
+                "id", selected.get("id")
+            ).execute()
+            db.table("historial_cambios").insert(history_payload).execute()
             st.success(
-                "Antecedentes enviados al SSMOCC."
-                if send else "Borrador guardado."
+                "Antecedentes enviados correctamente al SSMOCC."
+                if send
+                else "Borrador guardado correctamente."
             )
             st.cache_data.clear()
             st.rerun()
         except Exception as exc:
-            st.error(f"No fue posible guardar: {exc}")
-    if st.button("← Volver al dashboard"):
+            st.error(
+                "No fue posible guardar los antecedentes en Google Sheets. "
+                f"Detalle: {exc}"
+            )
+
+    if st.button("← Volver al dashboard público"):
+        st.session_state.pop("portal_user_id", None)
         st.query_params.clear()
         st.rerun()
-
 
 def admin_login() -> bool:
     configured = secret("ADMIN_PASSWORD")
