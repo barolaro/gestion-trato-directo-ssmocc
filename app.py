@@ -368,6 +368,7 @@ def service_client() -> SheetClient | None:
 
 
 
+@st.cache_resource
 def ensure_optional_sheet(name: str) -> bool:
     """Crea una hoja nueva sin permitir que su ausencia bloquee el dashboard."""
     spreadsheet = _spreadsheet()
@@ -395,54 +396,79 @@ def safe_read(table: str, columns: str = "*") -> list[dict[str, Any]]:
         return []
 
 
+def _records_from_values(values: list[list[Any]]) -> list[dict[str, Any]]:
+    if not values:
+        return []
+    headers = [str(value).strip() for value in values[0]]
+    records: list[dict[str, Any]] = []
+    for source in values[1:]:
+        record = {
+            header: _coerce(source[index] if index < len(source) else "")
+            for index, header in enumerate(headers)
+            if header
+        }
+        if record.get("id") not in ("", None):
+            try:
+                record["id"] = int(record["id"])
+            except (TypeError, ValueError):
+                pass
+        records.append(record)
+    return records
+
+
+def batch_read_tables() -> dict[str, list[dict[str, Any]]]:
+    """Lee todas las pestañas con una única solicitud batchGet."""
+    spreadsheet = _spreadsheet()
+    if spreadsheet is None:
+        raise RuntimeError("No existe conexión configurada con Google Sheets.")
+    table_names = list(SHEET_SCHEMAS)
+    ranges = [f"'{name}'!A:ZZ" for name in table_names]
+    response = spreadsheet.values_batch_get(
+        ranges,
+        params={"valueRenderOption": "UNFORMATTED_VALUE"},
+    )
+    value_ranges = response.get("valueRanges", [])
+    tables: dict[str, list[dict[str, Any]]] = {}
+    for index, name in enumerate(table_names):
+        values = (
+            value_ranges[index].get("values", [])
+            if index < len(value_ranges) else []
+        )
+        tables[name] = _records_from_values(values)
+    return tables
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def load_data() -> dict[str, list[dict[str, Any]]]:
     try:
-        client = public_client()
-        for table_name in SHEET_SCHEMAS:
-            if table_name != "resultados_minsal":
-                client.table(table_name)
-    except Exception as exc:
-        st.error(f"No fue posible conectar con Google Sheets: {exc}")
-        return {
-            "establecimientos": [],
-            "contratos": [],
-            "planes": [],
-            "plan_trabajo": [],
-            "cargas_mensuales": [],
-            "resultados_minsal": [],
-            "dataset_gzip_b64": "",
-        }
-
-    try:
-        if ensure_optional_sheet("resultados_minsal"):
-            client._worksheets.pop("resultados_minsal", None)
-            client.table("resultados_minsal")
+        ensure_optional_sheet("resultados_minsal")
+        tables = batch_read_tables()
     except Exception as exc:
         st.warning(
-            "La hoja de resultados MINSAL aún no está disponible: "
-            f"{exc}. El resto del dashboard seguirá funcionando."
+            "Google Sheets alcanzó temporalmente su límite de consultas. "
+            "El dashboard continuará mostrando la última base incorporada. "
+            f"Detalle: {exc}"
         )
+        tables = {name: [] for name in SHEET_SCHEMAS}
 
-    establishments = safe_read("establecimientos", "id,nombre,codigo,activo")
-    minsal_rows = []
-    try:
-        minsal_rows = (
-            client.table("resultados_minsal").select("*").execute().data or []
-        )
-    except Exception:
-        pass
+    establishments = tables.get("establecimientos", [])
+    chunks = tables.get("datos_dashboard", [])
+    chunks.sort(key=lambda row: int(row.get("orden") or 0))
+    dataset_gzip_b64 = "".join(
+        str(row.get("contenido") or "") for row in chunks
+    )
     return {
         "establecimientos": [
-            row for row in establishments if row.get("activo", True) not in (False, "")
+            row for row in establishments
+            if row.get("activo", True) not in (False, "")
         ],
-        "contratos": safe_read("contratos"),
-        "planes": safe_read("planes"),
-        "plan_trabajo": safe_read("plan_trabajo"),
-        "cargas_mensuales": safe_read("cargas_mensuales"),
-        "resultados_minsal": minsal_rows,
-        "dataset_gzip_b64": load_dashboard_dataset_b64(),
+        "contratos": tables.get("contratos", []),
+        "planes": tables.get("planes", []),
+        "plan_trabajo": tables.get("plan_trabajo", []),
+        "cargas_mensuales": tables.get("cargas_mensuales", []),
+        "resultados_minsal": tables.get("resultados_minsal", []),
+        "dataset_gzip_b64": dataset_gzip_b64,
     }
-
 
 # -----------------------------------------------------------------------------
 # NORMALIZACIÓN Y NOMBRES
