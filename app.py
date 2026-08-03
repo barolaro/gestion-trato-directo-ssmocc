@@ -367,6 +367,25 @@ def service_client() -> SheetClient | None:
     return _sheet_client()
 
 
+
+def ensure_optional_sheet(name: str) -> bool:
+    """Crea una hoja nueva sin permitir que su ausencia bloquee el dashboard."""
+    spreadsheet = _spreadsheet()
+    headers = SHEET_SCHEMAS.get(name, [])
+    if spreadsheet is None or not headers:
+        return False
+    try:
+        worksheet = spreadsheet.worksheet(name)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=name, rows=200, cols=len(headers)
+        )
+        worksheet.update(
+            range_name="A1", values=[headers], value_input_option="RAW"
+        )
+    return worksheet is not None
+
+
 def safe_read(table: str, columns: str = "*") -> list[dict[str, Any]]:
     try:
         result = public_client().table(table).select(columns).execute()
@@ -380,7 +399,8 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
     try:
         client = public_client()
         for table_name in SHEET_SCHEMAS:
-            client.table(table_name)
+            if table_name != "resultados_minsal":
+                client.table(table_name)
     except Exception as exc:
         st.error(f"No fue posible conectar con Google Sheets: {exc}")
         return {
@@ -393,7 +413,24 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
             "dataset_gzip_b64": "",
         }
 
+    try:
+        if ensure_optional_sheet("resultados_minsal"):
+            client._worksheets.pop("resultados_minsal", None)
+            client.table("resultados_minsal")
+    except Exception as exc:
+        st.warning(
+            "La hoja de resultados MINSAL aún no está disponible: "
+            f"{exc}. El resto del dashboard seguirá funcionando."
+        )
+
     establishments = safe_read("establecimientos", "id,nombre,codigo,activo")
+    minsal_rows = []
+    try:
+        minsal_rows = (
+            client.table("resultados_minsal").select("*").execute().data or []
+        )
+    except Exception:
+        pass
     return {
         "establecimientos": [
             row for row in establishments if row.get("activo", True) not in (False, "")
@@ -402,7 +439,7 @@ def load_data() -> dict[str, list[dict[str, Any]]]:
         "planes": safe_read("planes"),
         "plan_trabajo": safe_read("plan_trabajo"),
         "cargas_mensuales": safe_read("cargas_mensuales"),
-        "resultados_minsal": safe_read("resultados_minsal"),
+        "resultados_minsal": minsal_rows,
         "dataset_gzip_b64": load_dashboard_dataset_b64(),
     }
 
