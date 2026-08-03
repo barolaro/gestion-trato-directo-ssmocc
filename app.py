@@ -3488,7 +3488,16 @@ def apply_layout_patch(html: str) -> str:
       }
     </style>
     """
-    return html.replace("</head>", patch + "\n</head>", 1)
+    html = html.replace("</head>", patch + "\n</head>", 1)
+    trend_script = BASE_DIR / "trend_enhancement.js"
+    if trend_script.exists():
+        enhancement = trend_script.read_text(encoding="utf-8").replace(
+            "</script>", "<\\/script>"
+        )
+        html = html.replace(
+            "</body>", f"<script>{enhancement}</script>\n</body>", 1
+        )
+    return html
 
 
 def main() -> None:
