@@ -195,7 +195,7 @@
         },
         scales: {
           x: {grid: {display: false}, ticks: {font: {family: 'Inter', size: 11}, color: '#475569'}},
-          y: {position: 'left', grid: {color: '#f1f5f9'}, ticks: {font: {family: 'Inter', size: 10}, color: '#0063af', callback: value => '$' + value + ' millones'}},
+          y: {position: 'left', grid: {color: '#f1f5f9'}, ticks: {font: {family: 'Inter', size: 10}, color: '#0063af', callback: value => 'MM$ ' + value}},
           y1: {position: 'right', grid: {display: false}, ticks: {font: {family: 'Inter', size: 10}, color: '#e2242c'}}
         },
         plugins: {
