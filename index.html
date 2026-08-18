@@ -810,8 +810,8 @@ tailwind.config = { theme:{ extend:{
 const fmtCLP=n=>'$'+Math.round(n).toLocaleString('es-CL');
 const fmtNum=n=>Math.round(n).toLocaleString('es-CL');
 const fmtCompact=n=>{const a=Math.abs(n);
-  if(a>=1e9)return '$'+(n/1e9).toLocaleString('es-CL',{maximumFractionDigits:2})+' MMM';
-  if(a>=1e6)return '$'+(n/1e6).toLocaleString('es-CL',{maximumFractionDigits:1})+' M';
+  if(a>=1e9)return '$'+(n/1e9).toLocaleString('es-CL',{maximumFractionDigits:2})+' mil millones';
+  if(a>=1e6)return '$'+(n/1e6).toLocaleString('es-CL',{maximumFractionDigits:1})+' millones';
   if(a>=1e3)return '$'+(n/1e3).toLocaleString('es-CL',{maximumFractionDigits:0})+' mil';
   return '$'+fmtNum(n);};
 const round2=v=>Math.round(v*100)/100;
@@ -976,7 +976,7 @@ const baseOpts=(extra={})=>Object.assign({responsive:true,maintainAspectRatio:fa
 function renderCharts(f){
   const eM=new Map(); for(const r of f) if(!r.m) eM.set(r.e,(eM.get(r.e)||0)+r.t);
   const eA=[...eM.entries()].sort((a,b)=>b[1]-a[1]);
-  upsertBar('ch-estab',eA.map(x=>x[0]),eA.map(x=>x[1]/1e6),'#0063af','horizontal',' M');
+  upsertBar('ch-estab',eA.map(x=>x[0]),eA.map(x=>x[1]/1e6),'#0063af','horizontal',' millones');
 
   const cM=new Map(); for(const r of f) if(!r.m) cM.set(r.c,(cM.get(r.c)||0)+r.t);
   const cA=[...cM.entries()].sort((a,b)=>b[1]-a[1]);
@@ -1001,7 +1001,7 @@ function renderCharts(f){
 
   const pM=new Map(); for(const r of f) if(!r.m&&r.pr) pM.set(r.pr,(pM.get(r.pr)||0)+r.t);
   const pA=[...pM.entries()].sort((a,b)=>b[1]-a[1]).slice(0,10);
-  upsertBar('ch-prov',pA.map(x=>x[0].length>26?x[0].slice(0,26)+'…':x[0]),pA.map(x=>x[1]/1e6),'#0d9488','horizontal',' M');
+  upsertBar('ch-prov',pA.map(x=>x[0].length>26?x[0].slice(0,26)+'…':x[0]),pA.map(x=>x[1]/1e6),'#0d9488','horizontal',' millones');
 
   renderMap(f);
 }
@@ -1011,7 +1011,7 @@ function upsertBar(id,labels,data,color,orient,suffix){
     options:baseOpts({indexAxis:horiz?'y':'x',
       scales:{x:{grid:{color:'#f1f5f9'},ticks:{font:{family:'Inter',size:11},color:'#64748b',callback:v=>horiz?(suffix?'$'+v+suffix:fmtNum(v)):v}},
         y:{grid:{display:false},ticks:{font:{family:'Inter',size:11},color:'#475569',autoSkip:false}}},
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{const v=c.raw;return suffix===' M'?fmtCLP(v*1e6):(suffix?'$'+fmtNum(v):fmtNum(v)+' líneas');}}}}
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{const v=c.raw;return suffix===' millones'?fmtCLP(v*1e6):(suffix?'$'+fmtNum(v):fmtNum(v)+' líneas');}}}}
     })});
 }
 function upsertDoughnut(id,labels,data,colors){
